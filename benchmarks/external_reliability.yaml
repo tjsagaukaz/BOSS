@@ -1,0 +1,13 @@
+name: external_reliability_benchmark
+description: External repository benchmark suites for Level 4 operational reliability.
+suites:
+  - name: rich_examples
+    suite: suites/ext_rich_examples.yaml
+  - name: flask_feature
+    suite: suites/ext_flask_feature.yaml
+  - name: fastapi_docs_example
+    suite: suites/ext_fastapi_docs_example.yaml
+  - name: typer_docs_example
+    suite: suites/ext_typer_docs_example.yaml
+  - name: drf_validation
+    suite: suites/ext_django_rest_framework_validation.yaml

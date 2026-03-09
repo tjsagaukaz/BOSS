@@ -1,0 +1,25 @@
+name: ael_auth_latency
+project_name: ael_auth_benchmark
+stop_on_failure: true
+tasks:
+  - name: enable_auth_cache
+    mode: code
+    description: "Set CACHE_ENABLED = True in auth_service.py so benchmark_auth.py reports a lower latency_ms value without changing the public API."
+    sandbox_mode: auto
+    auto_approve: true
+    max_iterations: 1
+    allowed_paths:
+      - auth_service.py
+    required_changed_files:
+      - auth_service.py
+    expected_file_contains:
+      auth_service.py:
+        - "CACHE_ENABLED = True"
+    validation_commands:
+      - python3 benchmark_auth.py
+    require_tests_passed: true
+    forbidden_output_contains:
+      - "run the baseline benchmark"
+      - "measure the current implementation without modifications"
+    direct_engineer: true
+    plan_override: "Edit auth_service.py directly. Do not restate or re-measure the baseline. Change CACHE_ENABLED to True and keep the public API unchanged."

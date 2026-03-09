@@ -1,0 +1,12 @@
+name: legion_build_eval
+project_name: legion
+stop_on_failure: true
+tasks:
+  - name: create_benchmark_artifact
+    mode: build
+    description: "Create a file named benchmark_artifact.md with one sentence explaining that it was generated during a BOSS evaluation benchmark."
+    expected_files:
+      - benchmark_artifact.md
+    expected_file_contains:
+      benchmark_artifact.md:
+        - "This file was generated during a BOSS evaluation benchmark."

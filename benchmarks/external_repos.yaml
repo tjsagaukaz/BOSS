@@ -1,0 +1,33 @@
+name: curated_external_repos
+description: Curated external repositories for the BOSS operational reliability benchmark corpus.
+repos:
+  - name: fastapi
+    project_name: ext_fastapi
+    git_url: https://github.com/fastapi/fastapi.git
+    tags: [api, python, web]
+    notes: FastAPI framework repo for API and middleware benchmark tasks.
+  - name: django-rest-framework
+    project_name: ext_django_rest_framework
+    git_url: https://github.com/encode/django-rest-framework.git
+    tags: [api, django, python]
+    notes: Django REST Framework for serializer, view, and validation benchmark tasks.
+  - name: flask
+    project_name: ext_flask
+    git_url: https://github.com/pallets/flask.git
+    tags: [api, web, python]
+    notes: Flask framework for endpoint and middleware-style benchmark tasks.
+  - name: typer
+    project_name: ext_typer
+    git_url: https://github.com/fastapi/typer.git
+    tags: [cli, python]
+    notes: Typer CLI framework for command and option benchmark tasks.
+  - name: rich
+    project_name: ext_rich
+    git_url: https://github.com/Textualize/rich.git
+    tags: [cli, ui, python]
+    notes: Rich terminal UI toolkit for console rendering and utility benchmark tasks.
+  - name: langchain
+    project_name: ext_langchain
+    git_url: https://github.com/langchain-ai/langchain.git
+    tags: [llm, python, orchestration]
+    notes: LangChain monorepo for retrieval and tool-orchestration benchmark tasks.

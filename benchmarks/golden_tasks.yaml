@@ -1,0 +1,9 @@
+name: boss_golden_tasks
+description: Curated regression benchmark for core BOSS engineering behavior.
+suites:
+  - name: auth_latency
+    suite: suites/ael_auth_latency.yaml
+  - name: token_service
+    suite: suites/ael_token_service.yaml
+  - name: rate_limit
+    suite: suites/ael_rate_limit.yaml

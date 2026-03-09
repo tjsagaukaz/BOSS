@@ -1,0 +1,33 @@
+name: ext_rich_examples
+project_name: ext_rich
+stop_on_failure: true
+python_bin: current
+setup_create_venv: true
+skip_audit: true
+setup_commands:
+  - "{python_bin} -m pip install setuptools wheel"
+  - "{python_bin} -m pip install ."
+tasks:
+  - name: add_boss_table_example
+    mode: code
+    description: "Add examples/boss_table_demo.py that renders a small Rich table titled 'BOSS Benchmark' with two rows and can be executed directly."
+    sandbox_mode: auto
+    auto_approve: true
+    max_iterations: 1
+    allowed_paths:
+      - examples/
+    expected_files:
+      - examples/boss_table_demo.py
+    required_changed_files:
+      - examples/boss_table_demo.py
+    expected_file_contains:
+      examples/boss_table_demo.py:
+        - "from rich.console import Console"
+        - "from rich.table import Table"
+        - "def main()"
+        - "BOSS Benchmark"
+        - "__main__"
+    validation_commands:
+      - "{python_bin} examples/boss_table_demo.py"
+    direct_engineer: true
+    plan_override: "Create examples/boss_table_demo.py directly. The script should define main(), build a two-row table titled 'BOSS Benchmark', print it with Console(), and run from a __main__ guard."

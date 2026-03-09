@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BOSS Command Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --boss-bg: #0b0f1a;
+        --boss-panel: #111827;
+        --boss-panel-2: #0f172a;
+        --boss-border: #1f2937;
+        --boss-border-soft: rgba(31, 41, 55, 0.72);
+        --boss-accent: #22c55e;
+        --boss-accent-soft: rgba(34, 197, 94, 0.14);
+        --boss-text: #f9fafb;
+        --boss-text-2: #9ca3af;
+        --boss-danger: #ef4444;
+        --boss-warning: #f59e0b;
+        --boss-success: #22c55e;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: var(--boss-bg);
+        color: var(--boss-text);
+        font-family: "Inter", sans-serif;
+      }
+
+      body {
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      pre,
+      code,
+      textarea,
+      input[type="text"] {
+        font-family: "JetBrains Mono", monospace;
+      }
+
+      ::selection {
+        background: rgba(34, 197, 94, 0.18);
+      }
+
+      *::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+
+      *::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      *::-webkit-scrollbar-thumb {
+        background: rgba(148, 163, 184, 0.18);
+        border: 2px solid transparent;
+        border-radius: 999px;
+        background-clip: padding-box;
+      }
+
+      *::-webkit-scrollbar-thumb:hover {
+        background: rgba(148, 163, 184, 0.28);
+        background-clip: padding-box;
+      }
+
+      #appShell {
+        display: grid;
+        grid-template-rows: 64px minmax(0, 1fr) 36px;
+        height: 100vh;
+        overflow: hidden;
+        background:
+          linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(11, 15, 26, 1) 100%);
+      }
+
+      #statusBar {
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        backdrop-filter: blur(18px);
+        background: rgba(11, 15, 26, 0.9);
+        border-bottom: 1px solid var(--boss-border-soft);
+      }
+
+      #shellRoot {
+        min-height: 0;
+        overflow: hidden;
+        padding: 14px 16px 10px;
+      }
+
+      #layoutGrid {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr) 300px;
+        gap: 14px;
+        height: 100%;
+        min-height: 0;
+        transition: grid-template-columns 180ms ease;
+      }
+
+      #layoutGrid.left-collapsed {
+        grid-template-columns: 76px minmax(0, 1fr) 300px;
+      }
+
+      #layoutGrid.right-collapsed {
+        grid-template-columns: 240px minmax(0, 1fr) 72px;
+      }
+
+      #layoutGrid.left-collapsed.right-collapsed {
+        grid-template-columns: 76px minmax(0, 1fr) 72px;
+      }
+
+      .boss-rail,
+      .boss-workspace {
+        min-height: 0;
+        overflow: hidden;
+      }
+
+      .boss-rail {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .boss-rail-scroll,
+      .boss-workspace-scroll {
+        min-height: 0;
+        overflow: auto;
+        height: 100%;
+      }
+
+      .boss-workspace {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .boss-surface {
+        border: 1px solid var(--boss-border-soft);
+        background: rgba(17, 24, 39, 0.78);
+        border-radius: 18px;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+      }
+
+      .boss-surface-subtle {
+        border: 1px solid rgba(31, 41, 55, 0.9);
+        background: rgba(15, 23, 42, 0.68);
+        border-radius: 14px;
+      }
+
+      .rail-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        border: 1px solid rgba(31, 41, 55, 0.9);
+        background: rgba(15, 23, 42, 0.72);
+        color: var(--boss-text-2);
+        transition: all 160ms ease;
+      }
+
+      .rail-toggle:hover {
+        border-color: rgba(34, 197, 94, 0.4);
+        color: var(--boss-text);
+        background: rgba(34, 197, 94, 0.08);
+      }
+
+      #leftRail.collapsed .rail-label,
+      #leftRail.collapsed .rail-copy,
+      #leftRail.collapsed .project-copy,
+      #leftRail.collapsed .chat-copy,
+      #leftRail.collapsed .section-heading-copy,
+      #leftRail.collapsed .section-heading-meta,
+      #leftRail.collapsed .chat-session-tools,
+      #rightRail.collapsed .panel-heading-copy,
+      #rightRail.collapsed .panel-heading-meta,
+      #rightRail.collapsed .panel-body,
+      #rightRail.collapsed .right-panel-title {
+        display: none !important;
+      }
+
+      #leftRail.collapsed .boss-surface,
+      #rightRail.collapsed .boss-surface {
+        padding-left: 10px !important;
+        padding-right: 10px !important;
+      }
+
+      #leftRail.collapsed .rail-icon-button,
+      #rightRail.collapsed .rail-icon-button {
+        justify-content: center;
+      }
+
+      #leftRail.collapsed .project-card,
+      #leftRail.collapsed .chat-session-card {
+        padding: 10px;
+      }
+
+      #leftRail.collapsed .project-status-dot {
+        margin-left: 0;
+      }
+
+      #pulseBar {
+        position: sticky;
+        bottom: 0;
+        z-index: 40;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 0 16px;
+        border-top: 1px solid var(--boss-border-soft);
+        background: rgba(11, 15, 26, 0.94);
+        backdrop-filter: blur(16px);
+        color: var(--boss-text-2);
+        font-size: 12px;
+      }
+
+      #commandPalette {
+        backdrop-filter: blur(20px);
+      }
+
+      .command-kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 26px;
+        height: 22px;
+        padding: 0 8px;
+        border-radius: 8px;
+        border: 1px solid rgba(31, 41, 55, 0.9);
+        background: rgba(15, 23, 42, 0.72);
+        color: var(--boss-text-2);
+        font-size: 11px;
+        font-family: "JetBrains Mono", monospace;
+      }
+
+      .animate-pulse-soft {
+        animation: bossPulse 1.8s ease-in-out infinite;
+      }
+
+      @keyframes bossPulse {
+        0%, 100% { opacity: 0.55; transform: scale(1); }
+        50% { opacity: 1; transform: scale(1.08); }
+      }
+
+      .message-fade-in {
+        animation: messageIn 180ms ease-out;
+      }
+
+      @keyframes messageIn {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .workspace-chat-grid {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto auto;
+        min-height: 0;
+        height: 100%;
+      }
+
+      .glass-divider {
+        border-top: 1px solid rgba(31, 41, 55, 0.85);
+      }
+
+      .status-led {
+        display: inline-flex;
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+      }
+
+      .hidden-soft {
+        display: none !important;
+      }
+
+      @media (max-width: 1360px) {
+        #layoutGrid,
+        #layoutGrid.left-collapsed,
+        #layoutGrid.right-collapsed,
+        #layoutGrid.left-collapsed.right-collapsed {
+          grid-template-columns: 220px minmax(0, 1fr);
+        }
+
+        #rightRail {
+          display: none;
+        }
+      }
+
+      @media (max-width: 960px) {
+        #layoutGrid,
+        #layoutGrid.left-collapsed,
+        #layoutGrid.right-collapsed,
+        #layoutGrid.left-collapsed.right-collapsed {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        #leftRail {
+          display: none;
+        }
+
+        #shellRoot {
+          padding: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="appShell">
+      <header id="statusBar"></header>
+
+      <div id="shellRoot">
+        <div id="layoutGrid">
+          <aside id="leftRail" class="boss-rail">
+            <div class="boss-rail-scroll space-y-3">
+              <section class="boss-surface p-4">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <p class="section-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Navigation</p>
+                    <h2 class="section-heading-copy mt-1 text-base font-semibold text-slate-100">Control Tower</h2>
+                  </div>
+                  <button id="leftRailToggle" class="rail-toggle" type="button" title="Collapse sidebar">≡</button>
+                </div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <p class="section-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Projects</p>
+                    <h3 class="section-heading-copy mt-1 text-sm font-semibold text-slate-100">Project Switcher</h3>
+                  </div>
+                  <button id="refreshButton" class="rail-toggle" type="button" title="Refresh">↻</button>
+                </div>
+                <div id="projectList" class="mt-4 space-y-2"></div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <p class="section-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Chats</p>
+                    <h3 class="section-heading-copy mt-1 text-sm font-semibold text-slate-100">Conversation Threads</h3>
+                  </div>
+                  <div class="chat-session-tools flex items-center gap-2">
+                    <button id="newChatButton" class="rail-toggle" type="button" title="New chat">＋</button>
+                  </div>
+                </div>
+                <div id="chatSessionList" class="mt-4 space-y-2"></div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <p class="section-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Workspace</p>
+                <div id="workspaceNav" class="mt-3 space-y-2"></div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <p class="section-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Execution</p>
+                <div id="operationsNav" class="mt-3 space-y-2"></div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <p class="section-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">System</p>
+                <div id="systemNav" class="mt-3 space-y-2"></div>
+              </section>
+            </div>
+          </aside>
+
+          <main id="centerRail" class="boss-workspace">
+            <div class="boss-workspace-scroll space-y-3">
+              <section id="brainBanner" class="boss-surface p-5"></section>
+
+              <section class="boss-surface p-5">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p class="text-[10px] uppercase tracking-[0.28em] text-slate-500">Suggested Actions</p>
+                    <h2 class="mt-1 text-lg font-semibold text-slate-100">What should we do next?</h2>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="command-kbd">⌘K</span>
+                    <button id="commandPaletteButton" class="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-sm text-slate-200 transition hover:border-emerald-500/50 hover:bg-emerald-500/8">
+                      Command Palette
+                    </button>
+                  </div>
+                </div>
+                <div id="suggestionsPanel" class="mt-4 flex flex-wrap gap-2"></div>
+              </section>
+
+              <section id="chatWorkspace" class="boss-surface p-5">
+                <div class="workspace-chat-grid gap-4">
+                  <div class="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <p class="text-[10px] uppercase tracking-[0.28em] text-emerald-300">AI Workspace</p>
+                      <h2 class="mt-1 text-[2rem] font-semibold tracking-tight text-slate-50">BOSS Chat</h2>
+                      <p class="mt-2 max-w-2xl text-sm text-slate-400">Chat-first pair programming with live execution, context, and system awareness.</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span id="chatScopeBadge" class="rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1 text-[10px] uppercase tracking-[0.28em] text-slate-400">Workspace</span>
+                      <span id="modeBadge" class="rounded-full border border-emerald-700/60 bg-emerald-500/10 px-3 py-1 text-[10px] uppercase tracking-[0.28em] text-emerald-200">Mode: Chat</span>
+                      <button id="renameChatButton" class="rail-toggle" type="button" title="Rename chat">✎</button>
+                      <button id="pinChatButton" class="rail-toggle" type="button" title="Pin chat">★</button>
+                      <button id="deleteChatButton" class="rail-toggle" type="button" title="Delete chat">⌫</button>
+                      <button id="openDashboardButton" type="button" class="hidden rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:bg-emerald-500/8">
+                        Open Full Command Center
+                      </button>
+                    </div>
+                  </div>
+
+                  <div id="chatMessages" class="min-h-0 overflow-y-auto rounded-[18px] border border-slate-800 bg-slate-950/56 p-5"></div>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <button data-prompt-action="plan" class="rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-sky-500/50 hover:bg-sky-500/8">Plan</button>
+                    <button data-prompt-action="build" class="rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:bg-emerald-500/8">Build</button>
+                    <button data-prompt-action="code" class="rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-emerald-500/50 hover:bg-emerald-500/8">Code</button>
+                    <button data-prompt-action="tests" class="rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-amber-500/50 hover:bg-amber-500/8">Test</button>
+                    <button data-prompt-action="audit" class="rounded-full border border-slate-800 bg-slate-950/50 px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:border-rose-500/50 hover:bg-rose-500/8">Audit</button>
+                  </div>
+
+                  <form id="chatForm" class="space-y-3">
+                    <textarea
+                      id="chatInput"
+                      rows="4"
+                      placeholder="What will it be boss?"
+                      class="w-full rounded-[18px] border border-slate-800 bg-slate-950/70 px-4 py-4 text-[14px] leading-6 text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-emerald-500/55 focus:ring-1 focus:ring-emerald-500/20"
+                    ></textarea>
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                      <label class="flex items-center gap-2 text-sm text-slate-400">
+                        <input id="autoApproveToggle" type="checkbox" class="rounded border-slate-700 bg-slate-950">
+                        Auto-approve code changes when I trigger execution
+                      </label>
+                      <button type="submit" class="rounded-2xl bg-emerald-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300">
+                        Send
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </section>
+
+              <section id="runsWorkspace" class="hidden boss-surface p-5"></section>
+              <section id="metricsWorkspace" class="hidden boss-surface p-5"></section>
+              <section id="operationsWorkspace" class="hidden boss-surface p-5"></section>
+            </div>
+          </main>
+
+          <aside id="rightRail" class="boss-rail collapsed">
+            <div class="boss-rail-scroll space-y-3">
+              <section class="boss-surface p-4">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <p class="panel-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">System Activity</p>
+                    <h3 class="panel-heading-copy right-panel-title mt-1 text-sm font-semibold text-slate-100">Live Awareness</h3>
+                  </div>
+                  <button id="rightRailToggle" class="rail-toggle" type="button" title="Toggle activity panel">☰</button>
+                </div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <button data-collapse-target="activityPanel" class="rail-icon-button flex w-full items-center justify-between gap-3 text-left">
+                  <div>
+                    <p class="panel-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Agent Feed</p>
+                    <h3 class="panel-heading-copy mt-1 text-sm font-semibold text-slate-100">What BOSS is doing</h3>
+                  </div>
+                  <span class="text-xs text-slate-500">▾</span>
+                </button>
+                <div id="activityPanel" class="panel-body mt-4"></div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <button data-collapse-target="runGraphPanel" class="rail-icon-button flex w-full items-center justify-between gap-3 text-left">
+                  <div>
+                    <p class="panel-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Run Graph</p>
+                    <h3 class="panel-heading-copy mt-1 text-sm font-semibold text-slate-100">Execution Graph</h3>
+                  </div>
+                  <span class="text-xs text-slate-500">▾</span>
+                </button>
+                <div id="runGraphPanel" class="panel-body mt-4"></div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <button data-collapse-target="workspacePanel" class="rail-icon-button flex w-full items-center justify-between gap-3 text-left">
+                  <div>
+                    <p class="panel-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Workspace</p>
+                    <h3 class="panel-heading-copy mt-1 text-sm font-semibold text-slate-100">Live State</h3>
+                  </div>
+                  <span class="text-xs text-slate-500">▾</span>
+                </button>
+                <div id="workspacePanel" class="panel-body mt-4"></div>
+              </section>
+
+              <section class="boss-surface p-4">
+                <button data-collapse-target="logsPanelWrap" class="rail-icon-button flex w-full items-center justify-between gap-3 text-left">
+                  <div>
+                    <p class="panel-heading-meta text-[10px] uppercase tracking-[0.28em] text-slate-500">Logs</p>
+                    <h3 class="panel-heading-copy mt-1 text-sm font-semibold text-slate-100">Timeline & Logs</h3>
+                  </div>
+                  <span class="text-xs text-slate-500">▾</span>
+                </button>
+                <div id="logsPanelWrap" class="panel-body mt-4">
+                  <div id="timelinePanel" class="space-y-3"></div>
+                  <pre id="logsPanel" class="mt-4 max-h-[18rem] overflow-y-auto rounded-2xl border border-slate-800 bg-slate-950/60 p-4 text-xs text-slate-300"></pre>
+                </div>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      <footer id="pulseBar"></footer>
+    </div>
+
+    <div id="commandPalette" class="fixed inset-0 z-50 hidden bg-slate-950/72">
+      <div class="mx-auto mt-[11vh] w-[min(760px,calc(100vw-32px))] rounded-[20px] border border-slate-800 bg-slate-900/95 shadow-2xl shadow-slate-950/70">
+        <div class="border-b border-slate-800 px-5 py-4">
+          <input
+            id="commandPaletteInput"
+            type="text"
+            placeholder="Jump to anything… build legion, inspect the last run, open project brain"
+            class="w-full border-0 bg-transparent text-base text-slate-100 outline-none placeholder:text-slate-500"
+          >
+        </div>
+        <div id="commandPaletteResults" class="max-h-[24rem] overflow-y-auto p-3"></div>
+      </div>
+    </div>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

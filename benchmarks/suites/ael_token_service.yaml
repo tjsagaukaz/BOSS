@@ -1,0 +1,20 @@
+name: ael_token_service
+project_name: ael_token_service_benchmark
+stop_on_failure: true
+tasks:
+  - name: implement_token_service
+    mode: code
+    description: "Implement create_access_token and verify_token in token_service.py without adding third-party dependencies or changing the public API."
+    sandbox_mode: auto
+    auto_approve: true
+    max_iterations: 2
+    allowed_paths:
+      - token_service.py
+    required_changed_files:
+      - token_service.py
+    expected_symbols:
+      - create_access_token
+      - verify_token
+    require_tests_passed: true
+    direct_engineer: true
+    plan_override: "Edit token_service.py directly. Implement create_access_token and verify_token with only Python standard library modules. Preserve the existing function signatures."

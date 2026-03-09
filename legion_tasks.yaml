@@ -1,0 +1,11 @@
+name: legion_smoke_eval
+project_name: legion
+default_mode: plan
+stop_on_failure: true
+tasks:
+  - name: stripe_billing_plan
+    description: "Create a development plan for implementing Stripe billing in the Legion project."
+    expected_status: passed
+    expected_output_contains:
+      - "Stripe"
+      - "billing"

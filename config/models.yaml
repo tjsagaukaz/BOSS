@@ -1,0 +1,67 @@
+models:
+  architect:
+    provider: anthropic
+    model: claude-opus-4-6
+    max_tokens: 4096
+    temperature: 0.2
+  engineer:
+    provider: openai
+    model: gpt-5.4
+    max_tokens: 4096
+    temperature: 0.2
+    escalation_model: gpt-5.4-pro
+    escalation_min_attempt: 2
+    escalation_prompt_chars: 18000
+  test:
+    provider: openai
+    model: gpt-5.4
+    max_tokens: 4096
+    temperature: 0.2
+  auditor:
+    provider: anthropic
+    model: claude-opus-4-6
+    max_tokens: 4096
+    temperature: 0.1
+  security:
+    provider: anthropic
+    model: claude-opus-4-6
+    max_tokens: 4096
+    temperature: 0.1
+  documentation:
+    provider: anthropic
+    model: claude-opus-4-6
+    max_tokens: 4096
+    temperature: 0.2
+  conversation:
+    provider: openai
+    model: gpt-5.4
+    max_tokens: 2048
+    temperature: 0.3
+    discussion_role: architect
+    planning_role: architect
+    execution_role: engineer
+  research:
+    provider: openai
+    model: gpt-5.4
+    max_tokens: 4096
+    temperature: 0.2
+
+routing:
+  architecture: architect
+  planning: architect
+  coding: engineer
+  implementation: engineer
+  testing: test
+  tests: test
+  security: security
+  debugging: engineer
+  review: auditor
+  audit: auditor
+  documentation: documentation
+  conversation: conversation
+  research: research
+
+embeddings:
+  provider: local
+  model: hashed-256
+  dimensions: 256

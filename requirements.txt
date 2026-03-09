@@ -1,0 +1,14 @@
+openai
+anthropic
+langchain
+langgraph
+rich
+typer
+tqdm
+watchdog
+python-dotenv
+PyYAML
+fastapi
+uvicorn
+SpeechRecognition
+# sqlite3 is included in the Python standard library.

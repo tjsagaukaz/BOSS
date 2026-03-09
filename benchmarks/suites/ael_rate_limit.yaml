@@ -1,0 +1,23 @@
+name: ael_rate_limit
+project_name: ael_rate_limit_benchmark
+stop_on_failure: true
+tasks:
+  - name: add_rate_limiter
+    mode: code
+    description: "Add middleware/rate_limiter.py and wire a per-user two-requests-per-second limit into app.py without changing the handle_request signature."
+    sandbox_mode: auto
+    auto_approve: true
+    max_iterations: 2
+    allowed_paths:
+      - app.py
+      - middleware/
+    expected_files:
+      - middleware/rate_limiter.py
+    required_changed_files:
+      - app.py
+      - middleware/rate_limiter.py
+    expected_symbols:
+      - allow_request
+    require_tests_passed: true
+    direct_engineer: true
+    plan_override: "Create middleware/rate_limiter.py and update app.py directly. Implement a per-user limit of two requests per 1000ms while keeping the handle_request signature unchanged."

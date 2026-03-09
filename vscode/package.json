@@ -1,0 +1,60 @@
+{
+  "name": "boss-workspace-bridge",
+  "displayName": "BOSS Workspace Bridge",
+  "description": "Streams VS Code workspace events into the local BOSS runtime.",
+  "version": "0.1.0",
+  "publisher": "sagau",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:boss.openCommandCenter",
+    "onCommand:boss.pushWorkspaceState"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "boss.openCommandCenter",
+        "title": "BOSS: Open Command Center"
+      },
+      {
+        "command": "boss.pushWorkspaceState",
+        "title": "BOSS: Push Workspace State"
+      }
+    ],
+    "configuration": {
+      "title": "BOSS Workspace Bridge",
+      "properties": {
+        "boss.endpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:8080",
+          "description": "Base URL for the local BOSS web server."
+        },
+        "boss.enableSelectionEvents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send cursor and selection updates to BOSS."
+        },
+        "boss.enableSaveEvents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send file save events to BOSS."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.3"
+  }
+}

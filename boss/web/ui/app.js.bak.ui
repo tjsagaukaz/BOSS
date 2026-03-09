@@ -1,0 +1,1608 @@
+const state = {
+  runs: [],
+  tasks: [],
+  agents: [],
+  activities: [],
+  timeline: [],
+  workspace: {},
+  memory: {},
+  evolution: {},
+  health: {},
+  metrics: {},
+  runLedger: [],
+  logs: [],
+  chatHistory: [],
+  activeProject: null,
+  projectCatalog: [],
+  projectsStatus: {},
+  brain: {},
+  roadmap: {},
+  risks: [],
+  recommendations: [],
+  portfolio: {},
+  permissions: {},
+  mcp: {},
+  roots: {},
+  streamingTurn: null,
+  selectedRun: null,
+  selectedRunDetails: null,
+  centerView: "chat",
+  collapsedPanels: {},
+  commandPaletteOpen: false,
+  lastRefreshAt: null,
+};
+
+const urlParams = new URLSearchParams(window.location.search);
+const tauriMode = urlParams.get("app") === "tauri";
+const focusChatMode = urlParams.get("focus") === "chat";
+const chatViewMode = urlParams.get("view") === "chat";
+let chatComposerArmed = focusChatMode || chatViewMode;
+
+function qs(id) {
+  return document.getElementById(id);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function formatMultiline(value) {
+  return escapeHtml(value || "").replaceAll("\n", "<br>");
+}
+
+function currentTurns() {
+  return state.streamingTurn ? [...state.chatHistory, state.streamingTurn] : state.chatHistory;
+}
+
+function isWorkspaceProject(projectName) {
+  return !projectName || projectName === "__workspace__" || projectName === "workspace";
+}
+
+function activeScopeLabel() {
+  return isWorkspaceProject(state.activeProject) ? "Workspace" : state.activeProject;
+}
+
+function formatPercent(value) {
+  if (value == null || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+  return `${Math.round(Number(value) * 100)}%`;
+}
+
+function formatNumber(value, digits = 1) {
+  if (value == null || Number.isNaN(Number(value))) {
+    return "n/a";
+  }
+  return Number(value).toFixed(digits);
+}
+
+function formatTimestamp(value) {
+  if (!value) {
+    return "just now";
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(value);
+  }
+  return parsed.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function truncate(value, maxLength = 140) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function statusColor(status) {
+  const value = String(status || "").toLowerCase();
+  if (["completed", "ready", "passed", "stable", "healthy", "approved", "idle"].includes(value)) return "text-emerald-300";
+  if (["failed", "error", "aborted", "degraded", "blocked", "cancelled", "cancel_requested", "timeout"].includes(value)) return "text-rose-300";
+  if (["retrying", "paused", "warning", "degraded", "suggested"].includes(value)) return "text-amber-300";
+  if (["running", "planning", "chat", "reviewing", "executed", "thinking"].includes(value)) return "text-sky-300";
+  return "text-slate-300";
+}
+
+function healthPillClasses(status) {
+  const value = String(status || "").toLowerCase();
+  if (["stable", "healthy"].includes(value)) {
+    return "border border-emerald-700/60 bg-emerald-500/10 text-emerald-200";
+  }
+  if (["degraded", "warning", "unstable"].includes(value)) {
+    return "border border-amber-700/60 bg-amber-500/10 text-amber-200";
+  }
+  if (["failed", "error", "critical"].includes(value)) {
+    return "border border-rose-700/60 bg-rose-500/10 text-rose-200";
+  }
+  return "border border-slate-700 text-slate-300";
+}
+
+function dotClasses(status) {
+  const value = String(status || "").toLowerCase();
+  if (["completed", "passed", "healthy", "stable", "idle"].includes(value)) {
+    return "bg-emerald-400";
+  }
+  if (["failed", "error", "aborted", "timeout"].includes(value)) {
+    return "bg-rose-400";
+  }
+  if (["retrying", "paused", "waiting", "queued"].includes(value)) {
+    return "bg-amber-400";
+  }
+  return "bg-sky-400";
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+function focusChatComposer(force = false) {
+  if (!force && !chatComposerArmed) {
+    return;
+  }
+  const input = qs("chatInput");
+  if (!input) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    input.focus({ preventScroll: false });
+    input.scrollIntoView({ block: "nearest", behavior: tauriMode ? "smooth" : "auto" });
+    chatComposerArmed = false;
+  });
+}
+
+function setCenterView(view) {
+  state.centerView = view;
+  const views = [
+    ["chatWorkspace", "chat"],
+    ["runsWorkspace", "runs"],
+    ["metricsWorkspace", "metrics"],
+    ["operationsWorkspace", "operations"],
+  ];
+  for (const [id, key] of views) {
+    const node = qs(id);
+    if (!node) continue;
+    node.classList.toggle("hidden", key !== view);
+  }
+  renderLeftNav();
+  if (view === "chat") {
+    chatComposerArmed = true;
+    focusChatComposer(true);
+  }
+}
+
+function normalizeProjectCatalog() {
+  const catalog = Array.isArray(state.projectCatalog) ? state.projectCatalog : [];
+  return catalog
+    .map((item) => {
+      if (typeof item === "string") {
+        return { key: item, display_name: item, root: "", source_root: "workspace" };
+      }
+      return {
+        key: item.key || item.name || item.display_name,
+        display_name: item.display_name || item.key || item.name,
+        root: item.root || "",
+        source_root: item.source_root || "workspace",
+      };
+    })
+    .filter((item) => item.key);
+}
+
+function portfolioProjectMap() {
+  const projects = state.portfolio?.projects || [];
+  return Object.fromEntries(
+    projects.map((project) => [String(project.display_name || project.key || "").toLowerCase(), project]),
+  );
+}
+
+function currentBrain() {
+  return state.brain?.brain || {};
+}
+
+function currentRoadmap() {
+  return state.roadmap || {};
+}
+
+function suggestedFocus() {
+  const brain = currentBrain();
+  if (isWorkspaceProject(state.activeProject)) {
+    return "Portfolio orchestration";
+  }
+  return brain.current_focus || brain.focus || "Operator mode";
+}
+
+function displayNextPriority() {
+  const brain = currentBrain();
+  if (isWorkspaceProject(state.activeProject)) {
+    return state.recommendations?.[0]?.title || "Find the highest leverage move across the portfolio";
+  }
+  return (brain.next_priorities || [])[0] || "Keep pushing the current focus";
+}
+
+function displayKnownRisk() {
+  const brain = currentBrain();
+  if (isWorkspaceProject(state.activeProject)) {
+    return state.risks?.[0]?.title || "No major portfolio risk is surfaced right now";
+  }
+  return (brain.known_risks || [])[0] || "No major blockers recorded";
+}
+
+function buildMetricCard(label, value, tone = "text-slate-100", hint = "") {
+  return `
+    <div class="rounded-2xl border border-slate-800 bg-slate-900/65 px-4 py-3">
+      <p class="text-[10px] uppercase tracking-[0.28em] text-slate-500">${escapeHtml(label)}</p>
+      <p class="mt-2 text-xl font-semibold ${tone}">${escapeHtml(value)}</p>
+      ${hint ? `<p class="mt-1 text-xs text-slate-500">${escapeHtml(hint)}</p>` : ""}
+    </div>
+  `;
+}
+
+function renderStatusBar() {
+  const health = state.health || {};
+  const metrics = state.metrics || {};
+  const brain = currentBrain();
+  const statusProjectPill = qs("statusProjectPill");
+  const statusHealthPill = qs("statusHealthPill");
+  const statusProjectText = qs("statusProjectText");
+  const statusFocusText = qs("statusFocusText");
+  const statusHealthText = qs("statusHealthText");
+  const statusMetrics = qs("statusMetrics");
+  const projectLabel = activeScopeLabel();
+  const healthStatus = String(health.status || "unknown");
+  const runsCount = Array.isArray(state.runLedger) ? state.runLedger.length : 0;
+  const queuedTasks = Array.isArray(state.tasks) ? state.tasks.length : 0;
+  const agentsCount = Array.isArray(state.agents) ? state.agents.length : 0;
+  const parallelMode = metrics.run_graph?.parallel_mode || "off";
+
+  if (statusProjectPill) {
+    statusProjectPill.textContent = projectLabel;
+  }
+  if (statusHealthPill) {
+    statusHealthPill.className = `rounded-full px-3 py-1 text-xs ${healthPillClasses(healthStatus)}`;
+    statusHealthPill.textContent = healthStatus === "unknown" ? "Starting" : healthStatus.charAt(0).toUpperCase() + healthStatus.slice(1);
+  }
+  if (statusProjectText) {
+    statusProjectText.textContent = `Project: ${projectLabel}`;
+  }
+  if (statusFocusText) {
+    statusFocusText.textContent = `Focus: ${suggestedFocus()}`;
+  }
+  if (statusHealthText) {
+    const reason = (health.status_reasons || [])[0] || "Everything is connected and ready.";
+    statusHealthText.textContent = reason;
+  }
+  if (statusMetrics) {
+    statusMetrics.innerHTML = [
+      buildMetricCard("Success", formatPercent(health.autonomous_success_rate), statusColor(healthStatus), "Autonomous task success"),
+      buildMetricCard("Runs", String(runsCount), "text-slate-100", "Recent run ledger entries"),
+      buildMetricCard("Queued", String(queuedTasks), "text-slate-100", "Pending swarm tasks"),
+      buildMetricCard("Agents", String(agentsCount), "text-slate-100", "Specialists online"),
+      buildMetricCard("Parallel", String(parallelMode).toUpperCase(), parallelMode === "enabled" ? "text-emerald-200" : "text-amber-200", "Run graph mode"),
+    ].join("");
+  }
+}
+
+function renderLeftNavButtons(container, items) {
+  container.innerHTML = items
+    .map((item) => {
+      const active = item.active ? "border-emerald-700/60 bg-emerald-500/10 text-emerald-200" : "border-slate-800 bg-slate-950/40 text-slate-300 hover:border-slate-600";
+      return `
+        <button
+          type="button"
+          data-nav-action="${escapeHtml(item.action)}"
+          data-nav-value="${escapeHtml(item.value || "")}"
+          class="flex w-full items-start justify-between rounded-2xl border px-3 py-3 text-left transition ${active}"
+        >
+          <span>
+            <span class="block text-sm font-medium">${escapeHtml(item.label)}</span>
+            <span class="mt-1 block text-xs text-slate-500">${escapeHtml(item.description || "")}</span>
+          </span>
+          ${item.badge ? `<span class="ml-3 rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-slate-400">${escapeHtml(item.badge)}</span>` : ""}
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function renderProjectList() {
+  const container = qs("projectList");
+  if (!container) return;
+  const portfolioMap = portfolioProjectMap();
+  const active = isWorkspaceProject(state.activeProject) ? "__workspace__" : state.activeProject;
+  const projectItems = [
+    {
+      key: "__workspace__",
+      display_name: "Workspace",
+      root: state.roots?.primary_root || state.workspace?.workspace_root || "/Users/tj",
+      source_root: "workspace",
+    },
+    ...normalizeProjectCatalog(),
+  ];
+
+  container.innerHTML = projectItems
+    .map((project) => {
+      const projectKey = project.key;
+      const isActive = active === projectKey;
+      const portfolio = portfolioMap[String(project.display_name || project.key || "").toLowerCase()] || {};
+      const activeClasses = isActive
+        ? "border-emerald-700/60 bg-emerald-500/10 shadow-lg shadow-emerald-950/20"
+        : "border-slate-800 bg-slate-950/40 hover:border-slate-600";
+      return `
+        <button
+          type="button"
+          data-project-key="${escapeHtml(projectKey)}"
+          class="w-full rounded-2xl border p-4 text-left transition ${activeClasses}"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-sm font-semibold text-slate-100">${escapeHtml(project.display_name)}</p>
+              <p class="mt-1 text-xs uppercase tracking-[0.25em] text-slate-500">${escapeHtml(project.source_root || "workspace")}</p>
+            </div>
+            <span class="mt-1 h-2.5 w-2.5 rounded-full ${isActive ? "bg-emerald-400" : "bg-slate-700"}"></span>
+          </div>
+          <p class="mt-3 text-xs text-slate-400">${escapeHtml(portfolio.focus || portfolio.next_priority || project.root || "Ready")}</p>
+        </button>
+      `;
+    })
+    .join("");
+
+  container.querySelectorAll("button[data-project-key]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const projectKey = button.dataset.projectKey;
+      if (!projectKey) return;
+      await setActiveProject(projectKey);
+    });
+  });
+}
+
+function renderLeftNav() {
+  const workspaceNav = qs("workspaceNav");
+  const operationsNav = qs("operationsNav");
+  const systemNav = qs("systemNav");
+  if (!workspaceNav || !operationsNav || !systemNav) return;
+
+  renderLeftNavButtons(workspaceNav, [
+    {
+      label: "Chat",
+      description: "Think with BOSS in partner mode",
+      action: "view",
+      value: "chat",
+      active: state.centerView === "chat",
+      badge: "⌘1",
+    },
+    {
+      label: "Search My Mac",
+      description: "Search across your workspace roots",
+      action: "prefill",
+      value: "search my mac for ",
+    },
+    {
+      label: "Map Current Scope",
+      description: "Inspect architecture and layout",
+      action: "prefill",
+      value: "map the current project and give me the architecture summary",
+    },
+  ]);
+
+  renderLeftNavButtons(operationsNav, [
+    {
+      label: "Runs",
+      description: "Inspect recent runs and replays",
+      action: "view",
+      value: "runs",
+      active: state.centerView === "runs",
+      badge: "⌘2",
+    },
+    {
+      label: "Benchmarks",
+      description: "Run a reliability benchmark",
+      action: "prefill",
+      value: "run the next reliability benchmark",
+    },
+    {
+      label: "Experiments",
+      description: "Start or inspect lab work",
+      action: "prefill",
+      value: "show me the latest engineering experiments",
+    },
+    {
+      label: "Artifacts",
+      description: "Review plans, traces, and outputs",
+      action: "prefill",
+      value: "show me the latest artifacts and what they say",
+    },
+  ]);
+
+  renderLeftNavButtons(systemNav, [
+    {
+      label: "Metrics",
+      description: "System health, trends, and risk",
+      action: "view",
+      value: "metrics",
+      active: state.centerView === "metrics",
+      badge: "⌘3",
+    },
+    {
+      label: "Operations Deck",
+      description: "Portfolio, roots, permissions, MCP",
+      action: "view",
+      value: "operations",
+      active: state.centerView === "operations",
+      badge: "⌘4",
+    },
+    {
+      label: "Logs",
+      description: "Recent motion and diagnostic trail",
+      action: "scroll",
+      value: "logs",
+    },
+  ]);
+
+  document.querySelectorAll("button[data-nav-action]").forEach((button) => {
+    button.onclick = async () => {
+      const action = button.dataset.navAction;
+      const value = button.dataset.navValue || "";
+      if (action === "view") {
+        setCenterView(value);
+        return;
+      }
+      if (action === "prefill") {
+        seedPrompt(value);
+        return;
+      }
+      if (action === "scroll" && value === "logs") {
+        qs("logsPanelWrap")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    };
+  });
+}
+
+function renderBrainBanner() {
+  const panel = qs("brainBanner");
+  if (!panel) return;
+  const brain = currentBrain();
+  const projectLabel = activeScopeLabel();
+  const nextPriority = displayNextPriority();
+  const knownRisk = displayKnownRisk();
+  panel.innerHTML = `
+    <div class="flex flex-wrap items-start justify-between gap-5">
+      <div class="max-w-3xl">
+        <p class="text-xs uppercase tracking-[0.3em] text-emerald-300">${escapeHtml(projectLabel)}</p>
+        <h1 class="mt-2 text-3xl font-semibold tracking-tight text-slate-100">${escapeHtml(brain.mission || "Engineering command center")}</h1>
+        <p class="mt-3 max-w-2xl text-sm leading-7 text-slate-300">
+          ${escapeHtml(isWorkspaceProject(state.activeProject) ? "See the whole portfolio, surface the highest leverage move, and keep the system healthy." : brain.current_focus || brain.focus || "Stay close to the work, surface the best next move, and keep the system healthy.")}
+        </p>
+      </div>
+      <div class="grid min-w-[300px] flex-1 gap-3 sm:grid-cols-2">
+        <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+          <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Next Priority</p>
+          <p class="mt-2 text-sm font-medium text-slate-100">${escapeHtml(nextPriority)}</p>
+        </div>
+        <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+          <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Known Risk</p>
+          <p class="mt-2 text-sm font-medium text-slate-100">${escapeHtml(knownRisk)}</p>
+        </div>
+      </div>
+    </div>
+    <div class="mt-5 grid gap-3 lg:grid-cols-4">
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/35 p-4">
+        <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Mission</p>
+        <p class="mt-2 text-sm text-slate-200">${escapeHtml(brain.mission || "n/a")}</p>
+      </div>
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/35 p-4">
+        <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Focus</p>
+        <p class="mt-2 text-sm text-slate-200">${escapeHtml(suggestedFocus())}</p>
+      </div>
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/35 p-4">
+        <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Milestones</p>
+        <p class="mt-2 text-sm text-slate-200">${escapeHtml((brain.milestones || []).slice(0, 3).join(" • ") || "No milestones yet")}</p>
+      </div>
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/35 p-4">
+        <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Last Updated</p>
+        <p class="mt-2 text-sm text-slate-200">${escapeHtml(formatTimestamp(brain.updated_at))}</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderSuggestions() {
+  const panel = qs("suggestionsPanel");
+  if (!panel) return;
+  const recommendations = state.recommendations || [];
+  if (!recommendations.length) {
+    panel.innerHTML = `
+      <button type="button" data-suggestion="what's the highest leverage thing for us today?" class="rounded-2xl border border-dashed border-slate-700 px-4 py-3 text-left text-sm text-slate-400 transition hover:border-emerald-500 hover:text-slate-200">
+        Ask for the best next move
+      </button>
+    `;
+  } else {
+    panel.innerHTML = recommendations
+      .slice(0, 6)
+      .map(
+        (item) => `
+          <button
+            type="button"
+            data-suggestion="${escapeHtml(item.title || "")}"
+            class="rounded-2xl border border-slate-800 bg-slate-950/45 px-4 py-3 text-left transition hover:border-emerald-500 hover:bg-emerald-500/10"
+          >
+            <span class="block text-sm font-medium text-slate-100">${escapeHtml(item.title || "Next move")}</span>
+            <span class="mt-1 block text-xs text-slate-500">${escapeHtml(item.reason || item.source || "Suggested from your system state")}</span>
+          </button>
+        `,
+      )
+      .join("");
+  }
+  panel.querySelectorAll("button[data-suggestion]").forEach((button) => {
+    button.addEventListener("click", () => {
+      seedPrompt(button.dataset.suggestion || "");
+    });
+  });
+}
+
+function renderModeBadge() {
+  const badge = qs("modeBadge");
+  if (!badge) return;
+  const turns = currentTurns();
+  const lastTurn = turns[turns.length - 1];
+  const mode = lastTurn?.metadata?.mode || "chat";
+  badge.textContent = `Mode: ${String(mode).toUpperCase()}`;
+  badge.className = `rounded-full border px-3 py-1 text-xs uppercase tracking-[0.25em] ${healthPillClasses(mode)}`;
+}
+
+function chatActionButtons(actions, turnId) {
+  return (actions || [])
+    .map(
+      (action, index) => `
+        <button
+          type="button"
+          data-chat-action="true"
+          data-turn-id="${escapeHtml(turnId || "pending")}"
+          data-index="${index}"
+          data-intent="${escapeHtml(action.intent || "")}"
+          data-message="${encodeURIComponent(action.message || "")}"
+          data-execute="${action.execute ? "true" : "false"}"
+          data-auto-approve="${action.auto_approve ? "true" : "false"}"
+          class="rounded-full border border-emerald-700/60 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:border-emerald-500 hover:bg-emerald-500/10"
+        >
+          ${escapeHtml(action.label || "Run")}
+        </button>
+      `,
+    )
+    .join("");
+}
+
+function renderChat() {
+  const panel = qs("chatMessages");
+  if (!panel) return;
+  const turns = currentTurns();
+  if (!turns.length) {
+    panel.innerHTML = `
+      <div class="rounded-3xl border border-dashed border-slate-700 bg-slate-950/50 p-6 text-sm text-slate-400">
+        Hey TJ 👋 I’m in the room. Ask for strategy, research, code, or tell me what you want me to handle next.
+      </div>
+    `;
+    renderModeBadge();
+    return;
+  }
+
+  panel.innerHTML = turns
+    .map((turn) => {
+      const actions = chatActionButtons(turn.metadata?.actions || [], turn.id);
+      const result = turn.metadata?.result || {};
+      const artifactPath = result.artifact_path || result.path || "";
+      const summary = result.summary || result.message || "";
+      return `
+        <div class="space-y-3">
+          <div class="ml-auto max-w-[92%] rounded-[24px] bg-emerald-500/15 px-5 py-4 text-sm shadow-lg shadow-emerald-950/10">
+            <p class="text-xs uppercase tracking-[0.25em] text-emerald-200">TJ</p>
+            <div class="mt-2 text-[15px] leading-7 text-slate-50">${formatMultiline(turn.message)}</div>
+          </div>
+          <div class="max-w-[95%] rounded-[24px] border border-slate-800 bg-slate-900/85 px-5 py-4 text-sm shadow-xl shadow-slate-950/20">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-3">
+                <span class="inline-flex h-9 w-9 items-center justify-center rounded-2xl bg-slate-800 text-sm font-semibold text-emerald-200">B</span>
+                <div>
+                  <p class="text-xs uppercase tracking-[0.25em] text-slate-500">BOSS · ${escapeHtml(turn.intent || "conversation")}</p>
+                  <p class="text-sm font-medium text-slate-200">${escapeHtml(activeScopeLabel())}</p>
+                </div>
+              </div>
+              <span class="text-xs ${statusColor(turn.metadata?.mode || "chat")}">${escapeHtml(turn.metadata?.mode || "chat")}</span>
+            </div>
+            <div class="mt-4 text-[15px] leading-7 text-slate-100">${formatMultiline(turn.response)}</div>
+            ${turn.pending ? '<p class="mt-3 text-xs text-slate-500">Thinking…</p>' : ""}
+            ${summary ? `<div class="mt-4 rounded-2xl border border-slate-800 bg-slate-950/55 px-4 py-3 text-xs text-slate-300">${escapeHtml(truncate(summary, 220))}</div>` : ""}
+            ${artifactPath ? `<p class="mt-3 text-xs text-slate-500">Artifact: ${escapeHtml(artifactPath)}</p>` : ""}
+            ${actions ? `<div class="mt-4 flex flex-wrap gap-2">${actions}</div>` : ""}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  panel.querySelectorAll("button[data-chat-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const message = decodeURIComponent(button.dataset.message || "");
+      await sendChatStream(message, {
+        execute: button.dataset.execute === "true",
+        autoApprove: button.dataset.autoApprove === "true",
+        intent: button.dataset.intent || "",
+      });
+    });
+  });
+
+  panel.scrollTop = panel.scrollHeight;
+  renderModeBadge();
+}
+
+function renderRunsWorkspace() {
+  const panel = qs("runsWorkspacePanel");
+  if (!panel) return;
+  const selected = state.selectedRunDetails;
+  const runCards = (state.runLedger || [])
+    .slice(0, 10)
+    .map(
+      (item) => `
+        <button
+          type="button"
+          data-run-ledger="true"
+          data-id="${escapeHtml(item.identifier)}"
+          data-kind="${escapeHtml(item.kind === "build_task" ? "build" : item.kind === "evaluation_run" ? "evaluation" : "experiment")}"
+          class="w-full rounded-3xl border border-slate-800 bg-slate-950/45 p-4 text-left transition hover:border-slate-600"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="text-xs uppercase tracking-[0.25em] text-slate-500">${escapeHtml(item.project_name || "workspace")}</p>
+              <p class="mt-1 text-sm font-semibold text-slate-100">${escapeHtml(item.title || "Untitled run")}</p>
+              <p class="mt-2 text-xs text-slate-500">${escapeHtml(formatTimestamp(item.timestamp))}</p>
+            </div>
+            <div class="text-right">
+              <p class="text-xs uppercase tracking-[0.2em] text-slate-500">${escapeHtml(item.kind || "run")}</p>
+              <p class="mt-1 text-sm ${statusColor(item.status)}">${escapeHtml(item.status || "")}</p>
+            </div>
+          </div>
+        </button>
+      `,
+    )
+    .join("");
+
+  const summary = selected?.summary || {};
+  const details = selected
+    ? `
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">${escapeHtml(selected.kind || "run")}</p>
+        <h3 class="mt-2 text-xl font-semibold">${escapeHtml(summary.task || summary.suite_name || selected.identifier || "Run details")}</h3>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/55 p-4">
+            <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Status</p>
+            <p class="mt-2 text-sm ${statusColor(selected.status)}">${escapeHtml(selected.status || "unknown")}</p>
+          </div>
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/55 p-4">
+            <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Graph Nodes</p>
+            <p class="mt-2 text-sm text-slate-100">${escapeHtml(summary.graph_nodes != null ? summary.graph_nodes : "n/a")}</p>
+          </div>
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/55 p-4">
+            <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Retries</p>
+            <p class="mt-2 text-sm text-slate-100">${escapeHtml(summary.retries != null ? summary.retries : "n/a")}</p>
+          </div>
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/55 p-4">
+            <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Runtime</p>
+            <p class="mt-2 text-sm text-slate-100">${escapeHtml(summary.runtime_seconds != null ? `${summary.runtime_seconds}s` : "n/a")}</p>
+          </div>
+        </div>
+        <div class="mt-4 rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+          <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Artifact</p>
+          <p class="mt-2 break-all text-sm text-slate-200">${escapeHtml(selected.artifact_path || "n/a")}</p>
+        </div>
+      </div>
+    `
+    : `
+      <div class="rounded-3xl border border-dashed border-slate-700 bg-slate-950/40 p-5 text-sm text-slate-500">
+        Pick a run to inspect its summary, artifact path, and execution footprint.
+      </div>
+    `;
+
+  const liveSwarm = `
+    <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+      <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Live Swarm</p>
+      <div class="mt-4 space-y-3">
+        ${state.runs.length
+          ? state.runs
+              .slice(0, 4)
+              .map(
+                (run) => `
+                  <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+                    <div class="flex items-center justify-between gap-3">
+                      <div>
+                        <p class="text-sm font-medium text-slate-100">${escapeHtml(run.goal || "Run")}</p>
+                        <p class="mt-1 text-xs text-slate-500">${escapeHtml(run.project_name || activeScopeLabel())}</p>
+                      </div>
+                      <span class="text-xs ${statusColor(run.status)}">${escapeHtml(run.status || "")}</span>
+                    </div>
+                  </div>
+                `,
+              )
+              .join("")
+          : '<div class="text-sm text-slate-500">No live swarm runs right now.</div>'}
+      </div>
+    </div>
+  `;
+
+  panel.innerHTML = `
+    <div class="space-y-4">${runCards || '<div class="rounded-3xl border border-dashed border-slate-700 p-5 text-sm text-slate-500">No runs recorded yet.</div>'}</div>
+    <div class="space-y-4">${details}${liveSwarm}</div>
+  `;
+
+  panel.querySelectorAll("button[data-run-ledger]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await loadRunDetails(button.dataset.id, button.dataset.kind);
+    });
+  });
+}
+
+function trendBars(entries, labelKey) {
+  return entries
+    .map((entry) => {
+      const pct = Math.max(0, Math.min(100, Math.round((entry.success_rate || 0) * 100)));
+      return `
+        <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+          <div class="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.25em] text-slate-500">
+            <span>${escapeHtml(labelKey(entry))}</span>
+            <span>${pct}%</span>
+          </div>
+          <div class="mt-3 h-2.5 overflow-hidden rounded-full bg-slate-800">
+            <div class="h-full rounded-full bg-emerald-400/90" style="width:${pct}%"></div>
+          </div>
+          <p class="mt-3 text-xs text-slate-500">${entry.passed || 0}/${entry.attempted || entry.total || 0} successful</p>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderMetricsWorkspace() {
+  const panel = qs("metricsWorkspacePanel");
+  if (!panel) return;
+  const health = state.health || {};
+  const metrics = state.metrics || {};
+  const trends = metrics.trends || {};
+  const roadmap = currentRoadmap();
+  const risks = state.risks || [];
+
+  panel.innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">System Health</p>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          ${buildMetricCard("Status", String(health.status || "unknown").toUpperCase(), statusColor(health.status))}
+          ${buildMetricCard("Success Rate", formatPercent(health.autonomous_success_rate), "text-slate-100")}
+          ${buildMetricCard("Recent Failures", String(health.recent_eval_failures || 0), "text-slate-100")}
+          ${buildMetricCard("Artifacts", String(health.artifact_store_size || 0), "text-slate-100")}
+        </div>
+        <ul class="mt-4 space-y-2 text-sm text-slate-300">
+          ${(health.status_reasons || []).map((item) => `<li>• ${escapeHtml(item)}</li>`).join("") || "<li>• No health notes yet.</li>"}
+        </ul>
+      </div>
+
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Success Trends</p>
+        <div class="mt-4 grid gap-3">
+          ${trendBars(trends.tasks || [], (entry) => `Last ${entry.window} Tasks`) || '<div class="text-sm text-slate-500">No task trend data yet.</div>'}
+        </div>
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Runtime Metrics</p>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          ${buildMetricCard("Runs Recorded", String(metrics.task_runs_recorded || 0))}
+          ${buildMetricCard("Benchmarks", String(metrics.benchmarks_executed || 0))}
+          ${buildMetricCard("Experiments", String(metrics.experiments_executed || 0))}
+          ${buildMetricCard("Avg Graph Nodes", formatNumber(metrics.run_graph?.avg_nodes_per_run, 1))}
+        </div>
+      </div>
+
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Strategic Risks</p>
+        <div class="mt-4 space-y-3">
+          ${risks.length
+            ? risks
+                .slice(0, 5)
+                .map(
+                  (risk) => `
+                    <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+                      <div class="flex items-center justify-between gap-3">
+                        <p class="text-sm font-medium text-slate-100">${escapeHtml(risk.title || "Risk")}</p>
+                        <span class="text-xs ${statusColor(risk.severity || "warning")}">${escapeHtml(risk.severity || "MEDIUM")}</span>
+                      </div>
+                      <p class="mt-2 text-sm text-slate-400">${escapeHtml(risk.reason || "")}</p>
+                    </div>
+                  `,
+                )
+                .join("")
+            : '<div class="text-sm text-slate-500">No strategic risks recorded right now.</div>'}
+        </div>
+      </div>
+
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Roadmap</p>
+        <div class="mt-4 grid gap-3">
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+            <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Completed</p>
+            <p class="mt-2 text-sm text-slate-200">${escapeHtml((roadmap.completed || []).join(" • ") || "None yet")}</p>
+          </div>
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+            <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">In Progress</p>
+            <p class="mt-2 text-sm text-slate-200">${escapeHtml((roadmap.in_progress || []).join(" • ") || "Nothing active")}</p>
+          </div>
+          <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+            <p class="text-[10px] uppercase tracking-[0.25em] text-slate-500">Future</p>
+            <p class="mt-2 text-sm text-slate-200">${escapeHtml((roadmap.future || []).join(" • ") || "No future roadmap yet")}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderOperationsWorkspace() {
+  const panel = qs("operationsWorkspacePanel");
+  if (!panel) return;
+  const portfolio = state.portfolio || {};
+  const roots = state.roots || {};
+  const permissions = state.permissions || {};
+  const mcp = state.mcp || {};
+  const memory = state.memory || {};
+
+  panel.innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Portfolio</p>
+        <p class="mt-2 text-sm text-slate-300">${escapeHtml(`${portfolio.project_count || 0} visible projects`)}</p>
+        <div class="mt-4 space-y-3">
+          ${(portfolio.projects || [])
+            .slice(0, 6)
+            .map(
+              (project) => `
+                <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+                  <p class="text-sm font-medium text-slate-100">${escapeHtml(project.display_name || project.key || "Project")}</p>
+                  <p class="mt-1 text-sm text-slate-400">${escapeHtml(project.focus || project.next_priority || project.root || "")}</p>
+                </div>
+              `,
+            )
+            .join("") || '<div class="text-sm text-slate-500">No portfolio entries yet.</div>'}
+        </div>
+      </div>
+
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Workspace Roots</p>
+        <div class="mt-4 space-y-3">
+          ${(roots.roots || [])
+            .slice(0, 8)
+            .map(
+              (root) => `
+                <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+                  <div class="flex items-center justify-between gap-3">
+                    <p class="text-sm font-medium text-slate-100">${escapeHtml(root.name || "root")}</p>
+                    <span class="text-xs text-slate-500">${escapeHtml(root.mode || "projects")}</span>
+                  </div>
+                  <p class="mt-2 break-all text-xs text-slate-400">${escapeHtml(root.path || "")}</p>
+                </div>
+              `,
+            )
+            .join("") || '<div class="text-sm text-slate-500">No roots configured.</div>'}
+        </div>
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Permissions</p>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          ${buildMetricCard("Workspace Writes", String(permissions.workspace_write_mode || "confirm").toUpperCase())}
+          ${buildMetricCard("Project Writes", String(permissions.project_write_mode || "confirm").toUpperCase())}
+          ${buildMetricCard("Destructive", String(permissions.destructive_mode || "confirm").toUpperCase())}
+          ${buildMetricCard("Web Research", permissions.allow_web_research ? "ON" : "OFF", permissions.allow_web_research ? "text-emerald-200" : "text-amber-200")}
+        </div>
+      </div>
+
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">MCP Connectors</p>
+        <div class="mt-4 space-y-3">
+          ${(mcp.connectors || [])
+            .slice(0, 6)
+            .map(
+              (connector) => `
+                <div class="rounded-2xl border border-slate-800 bg-slate-900/45 p-4">
+                  <div class="flex items-center justify-between gap-3">
+                    <p class="text-sm font-medium text-slate-100">${escapeHtml(connector.name || "connector")}</p>
+                    <span class="text-xs ${statusColor(connector.healthy ? "stable" : "degraded")}">${connector.healthy ? "healthy" : "offline"}</span>
+                  </div>
+                  <p class="mt-2 text-sm text-slate-400">${escapeHtml(connector.transport || "")} → ${escapeHtml(connector.target || "")}</p>
+                </div>
+              `,
+            )
+            .join("") || '<div class="text-sm text-slate-500">No MCP connectors registered yet.</div>'}
+        </div>
+      </div>
+
+      <div class="rounded-3xl border border-slate-800 bg-slate-950/45 p-5">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Memory Insights</p>
+        <p class="mt-2 text-sm text-slate-300">${escapeHtml(memory.project_profile?.description || "No project memory loaded in this scope.")}</p>
+        <p class="mt-3 text-xs text-slate-500">${escapeHtml((memory.solutions || []).length)} reusable solutions • ${escapeHtml((memory.graph_insights || []).length)} graph insights</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderActivities() {
+  const panel = qs("activityPanel");
+  if (!panel) return;
+  const activities = state.activities || [];
+  panel.innerHTML = activities.length
+    ? activities
+        .slice(0, 8)
+        .map(
+          (activity) => `
+            <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="flex items-center gap-3">
+                  <span class="inline-flex h-8 w-8 items-center justify-center rounded-2xl bg-slate-800 text-xs font-semibold text-slate-200">${escapeHtml((activity.agent || "B").slice(0, 1).toUpperCase())}</span>
+                  <div>
+                    <p class="text-sm font-medium text-slate-100">${escapeHtml(activity.agent || "BOSS")}</p>
+                    <p class="text-xs uppercase tracking-[0.2em] text-slate-500">${escapeHtml(activity.project_name || activeScopeLabel())}</p>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="h-2.5 w-2.5 rounded-full ${dotClasses(activity.status)}"></span>
+                  <span class="text-xs ${statusColor(activity.status)}">${escapeHtml(activity.status || "idle")}</span>
+                </div>
+              </div>
+              <p class="mt-3 text-sm text-slate-300">${escapeHtml(activity.message || "Standing by")}</p>
+              <p class="mt-2 text-xs text-slate-500">${escapeHtml(formatTimestamp(activity.updated_at))}</p>
+            </div>
+          `,
+        )
+        .join("")
+    : '<div class="rounded-2xl border border-dashed border-slate-700 p-4 text-sm text-slate-500">No live agent activity yet.</div>';
+}
+
+function renderRunGraph() {
+  const panel = qs("runGraphPanel");
+  if (!panel) return;
+  const tasks = state.tasks || [];
+  const activities = state.activities || [];
+  let html = "";
+
+  if (tasks.length) {
+    html = `
+      <div class="space-y-3">
+        ${tasks
+          .slice(0, 6)
+          .map(
+            (task, index) => `
+              <div class="relative rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                ${index < tasks.length - 1 ? '<span class="absolute left-7 top-full h-4 w-px bg-slate-800"></span>' : ""}
+                <div class="flex items-center gap-3">
+                  <span class="h-3 w-3 rounded-full ${dotClasses(task.status)}"></span>
+                  <div>
+                    <p class="text-sm font-medium text-slate-100">${escapeHtml(task.title || task.agent_type || "Step")}</p>
+                    <p class="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">${escapeHtml(task.agent_type || "agent")}</p>
+                  </div>
+                </div>
+                <p class="mt-3 text-sm text-slate-400">${escapeHtml(task.status || "")}</p>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    `;
+  } else if (activities.length) {
+    html = `
+      <div class="space-y-3">
+        ${activities
+          .slice(0, 5)
+          .map(
+            (activity, index) => `
+              <div class="relative rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                ${index < activities.length - 1 ? '<span class="absolute left-7 top-full h-4 w-px bg-slate-800"></span>' : ""}
+                <div class="flex items-center gap-3">
+                  <span class="h-3 w-3 rounded-full ${dotClasses(activity.status)}"></span>
+                  <p class="text-sm font-medium text-slate-100">${escapeHtml(activity.agent || "agent")}</p>
+                </div>
+                <p class="mt-3 text-sm text-slate-400">${escapeHtml(activity.message || "")}</p>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    `;
+  } else if (state.selectedRunDetails?.summary) {
+    const summary = state.selectedRunDetails.summary;
+    html = `
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+        <p class="text-sm font-medium text-slate-100">${escapeHtml(summary.task || summary.suite_name || "Run summary")}</p>
+        <p class="mt-2 text-sm text-slate-400">Graph nodes: ${escapeHtml(summary.graph_nodes != null ? summary.graph_nodes : "n/a")}</p>
+        <p class="mt-1 text-sm text-slate-400">Retries: ${escapeHtml(summary.retries != null ? summary.retries : "n/a")}</p>
+      </div>
+    `;
+  } else {
+    html = '<div class="rounded-2xl border border-dashed border-slate-700 p-4 text-sm text-slate-500">No live run graph yet.</div>';
+  }
+
+  panel.innerHTML = html;
+}
+
+function renderWorkspacePanel() {
+  const panel = qs("workspacePanel");
+  if (!panel) return;
+  const workspace = state.workspace || {};
+  const recentEdits = workspace.recent_edits || [];
+  const openFiles = workspace.open_files || [];
+  panel.innerHTML = `
+    <div class="space-y-4">
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Open Files</p>
+        <ul class="mt-3 space-y-2 text-sm text-slate-200">
+          ${openFiles.slice(0, 5).map((file) => `<li>${escapeHtml(file)}</li>`).join("") || "<li class='text-slate-500'>No files open yet.</li>"}
+        </ul>
+      </div>
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Recent Edits</p>
+        <ul class="mt-3 space-y-3 text-sm text-slate-200">
+          ${recentEdits
+            .slice(0, 4)
+            .map(
+              (edit) => `
+                <li>
+                  <span class="font-medium">${escapeHtml(edit.file || "file")}</span>
+                  <span class="mt-1 block text-xs text-slate-500">${escapeHtml(edit.summary || edit.type || "updated")}</span>
+                </li>
+              `,
+            )
+            .join("") || "<li class='text-slate-500'>No recent edits recorded.</li>"}
+        </ul>
+      </div>
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Last Command</p>
+        <p class="mt-3 text-sm text-slate-200">${escapeHtml(workspace.last_terminal_command || "None")}</p>
+        <p class="mt-2 text-xs text-slate-500">${escapeHtml(workspace.last_test_results?.failure_summary || workspace.last_test_results?.message || "No failing test recorded")}</p>
+      </div>
+      <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+        <p class="text-xs uppercase tracking-[0.25em] text-slate-500">Git</p>
+        <p class="mt-3 text-sm text-slate-200">${escapeHtml(workspace.last_git_status?.summary || "No git state recorded")}</p>
+        <p class="mt-2 text-xs text-slate-500">${escapeHtml(truncate(workspace.last_git_diff || "No diff recorded", 180))}</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderTimelineAndLogs() {
+  const timelinePanel = qs("timelinePanel");
+  const logsPanel = qs("logsPanel");
+  if (timelinePanel) {
+    timelinePanel.innerHTML = (state.timeline || []).length
+      ? state.timeline
+          .slice(0, 8)
+          .map(
+            (event) => `
+              <div class="rounded-2xl border border-slate-800 bg-slate-950/45 p-4">
+                <div class="flex items-center justify-between gap-3">
+                  <p class="text-sm font-medium text-slate-100">${escapeHtml(event.title || "Event")}</p>
+                  <span class="text-xs ${statusColor(event.status)}">${escapeHtml(event.status || "")}</span>
+                </div>
+                <p class="mt-2 text-sm text-slate-400">${escapeHtml(event.message || "")}</p>
+                <p class="mt-2 text-xs text-slate-500">${escapeHtml(formatTimestamp(event.timestamp))}</p>
+              </div>
+            `,
+          )
+          .join("")
+      : '<div class="rounded-2xl border border-dashed border-slate-700 p-4 text-sm text-slate-500">No timeline yet.</div>';
+  }
+  if (logsPanel) {
+    logsPanel.textContent = (state.logs || [])
+      .slice(-80)
+      .map((entry) => `[${entry.timestamp || ""}] ${entry.level || "info"} ${entry.agent || "boss"} ${entry.message || ""}`)
+      .join("\n");
+    logsPanel.scrollTop = logsPanel.scrollHeight;
+  }
+}
+
+function renderRightRail() {
+  renderActivities();
+  renderRunGraph();
+  renderWorkspacePanel();
+  renderTimelineAndLogs();
+}
+
+function renderCommandPalette() {
+  const palette = qs("commandPalette");
+  const results = qs("commandPaletteResults");
+  const input = qs("commandPaletteInput");
+  if (!palette || !results || !input) return;
+  palette.classList.toggle("hidden", !state.commandPaletteOpen);
+  if (!state.commandPaletteOpen) {
+    return;
+  }
+
+  const commands = [
+    { label: "Open chat", hint: "⌘1", action: () => setCenterView("chat") },
+    { label: "Open runs", hint: "⌘2", action: () => setCenterView("runs") },
+    { label: "Open metrics", hint: "⌘3", action: () => setCenterView("metrics") },
+    { label: "Open operations", hint: "⌘4", action: () => setCenterView("operations") },
+    { label: "Refresh the command center", hint: "Fetch latest state", action: () => refreshAll() },
+    { label: "Focus chat composer", hint: "Start typing", action: () => focusChatComposer(true) },
+    { label: "Plan the next move", hint: "Prefill", action: () => seedPrompt("plan the next highest leverage move for me") },
+    { label: "Build current priority", hint: "⌘R", action: () => seedPrompt(`build ${suggestedFocus()}`) },
+    { label: "Run a reliability benchmark", hint: "Benchmark", action: () => seedPrompt("run the next reliability benchmark") },
+    { label: "Show strategic risks", hint: "Risk scan", action: () => seedPrompt("show me the top risks right now") },
+    ...(tauriMode && chatViewMode
+      ? [{ label: "Open full command center", hint: "Expand layout", action: () => openFullDashboard() }]
+      : []),
+  ];
+
+  const query = input.value.trim().toLowerCase();
+  const filtered = commands.filter((command) => {
+    if (!query) return true;
+    return `${command.label} ${command.hint || ""}`.toLowerCase().includes(query);
+  });
+
+  results.innerHTML = filtered
+    .map(
+      (command, index) => `
+        <button type="button" data-command-index="${index}" class="flex w-full items-center justify-between rounded-2xl border border-slate-800 bg-slate-950/40 px-4 py-3 text-left transition hover:border-emerald-500 hover:bg-emerald-500/10">
+          <span>
+            <span class="block text-sm font-medium text-slate-100">${escapeHtml(command.label)}</span>
+            <span class="mt-1 block text-xs text-slate-500">${escapeHtml(command.hint || "Command")}</span>
+          </span>
+        </button>
+      `,
+    )
+    .join("") || '<div class="rounded-2xl border border-dashed border-slate-700 p-4 text-sm text-slate-500">No commands match that query.</div>';
+
+  results.querySelectorAll("button[data-command-index]").forEach((button) => {
+    button.onclick = async () => {
+      const command = filtered[Number(button.dataset.commandIndex)];
+      closeCommandPalette();
+      await command.action();
+    };
+  });
+}
+
+function openCommandPalette() {
+  state.commandPaletteOpen = true;
+  renderCommandPalette();
+  window.requestAnimationFrame(() => qs("commandPaletteInput")?.focus());
+}
+
+function closeCommandPalette() {
+  state.commandPaletteOpen = false;
+  renderCommandPalette();
+}
+
+function seedPrompt(prefix) {
+  setCenterView("chat");
+  const input = qs("chatInput");
+  if (!input) return;
+  input.value = prefix;
+  focusChatComposer(true);
+}
+
+function openFullDashboard() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("view");
+  url.searchParams.delete("focus");
+  window.location.href = url.toString();
+}
+
+function applyTauriChatLayout() {
+  if (!(tauriMode && chatViewMode)) {
+    return;
+  }
+  const layoutGrid = qs("layoutGrid");
+  const leftRail = qs("leftRail");
+  const rightRail = qs("rightRail");
+  const shellRoot = qs("shellRoot");
+  const openDashboardButton = qs("openDashboardButton");
+
+  if (layoutGrid) {
+    layoutGrid.className = "grid gap-4 xl:grid-cols-[minmax(0,1fr)]";
+  }
+  leftRail?.classList.add("hidden");
+  rightRail?.classList.add("hidden");
+  shellRoot?.classList.remove("max-w-[1820px]");
+  shellRoot?.classList.add("max-w-[1280px]");
+  openDashboardButton?.classList.remove("hidden");
+  setCenterView("chat");
+}
+
+async function setActiveProject(projectKey) {
+  await fetchJson("/projects/active", {
+    method: "POST",
+    body: JSON.stringify({ project_name: projectKey }),
+  });
+  state.selectedRun = null;
+  state.selectedRunDetails = null;
+  await refreshAll();
+}
+
+async function loadRunDetails(identifier, kind) {
+  if (!identifier || !kind) return;
+  state.selectedRun = { identifier, kind };
+  state.selectedRunDetails = await fetchJson(`/runs/${encodeURIComponent(identifier)}?kind=${encodeURIComponent(kind)}`);
+  renderRunsWorkspace();
+  renderRunGraph();
+}
+
+async function refreshAll() {
+  const responses = await Promise.all([
+    fetchJson("/tasks"),
+    fetchJson("/agents"),
+    fetchJson("/projects"),
+    fetchJson("/workspace"),
+    fetchJson("/memory"),
+    fetchJson("/evolution"),
+    fetchJson("/logs"),
+    fetchJson("/chat/history"),
+    fetchJson("/activity"),
+    fetchJson("/timeline"),
+    fetchJson("/health"),
+    fetchJson("/metrics"),
+    fetchJson("/runs?limit=12"),
+    fetchJson("/brain"),
+    fetchJson("/next?limit=6"),
+    fetchJson("/roadmap"),
+    fetchJson("/risks?limit=6"),
+    fetchJson("/portfolio"),
+    fetchJson("/permissions"),
+    fetchJson("/mcp"),
+    fetchJson("/roots"),
+  ]);
+
+  const [
+    tasks,
+    agents,
+    projects,
+    workspace,
+    memory,
+    evolution,
+    logs,
+    chat,
+    activity,
+    timeline,
+    health,
+    metrics,
+    runs,
+    brain,
+    nextActions,
+    roadmap,
+    risks,
+    portfolio,
+    permissions,
+    mcp,
+    roots,
+  ] = responses;
+
+  state.runs = tasks.runs || [];
+  state.tasks = tasks.tasks || [];
+  state.agents = agents.agents || [];
+  state.projectsStatus = projects.status || {};
+  state.projectCatalog = projects.project_catalog || projects.projects || [];
+  state.activeProject = projects.active_project || null;
+  state.workspace = workspace || {};
+  state.memory = memory || {};
+  state.evolution = evolution || {};
+  state.logs = logs.logs || [];
+  state.chatHistory = chat.history || [];
+  state.activities = activity.activities || [];
+  state.timeline = timeline.events || [];
+  state.health = health || {};
+  state.metrics = metrics || {};
+  state.runLedger = runs.runs || [];
+  state.brain = brain || {};
+  state.recommendations = nextActions.recommendations || [];
+  state.roadmap = roadmap || {};
+  state.risks = risks.risks || [];
+  state.portfolio = portfolio || {};
+  state.permissions = permissions || {};
+  state.mcp = mcp || {};
+  state.roots = roots || {};
+  state.lastRefreshAt = new Date().toISOString();
+
+  if (state.selectedRun) {
+    const stillExists = state.runLedger.some((item) => String(item.identifier) === String(state.selectedRun.identifier));
+    if (!stillExists) {
+      state.selectedRun = null;
+      state.selectedRunDetails = null;
+    }
+  }
+
+  renderAll();
+}
+
+function renderAll() {
+  renderStatusBar();
+  renderProjectList();
+  renderLeftNav();
+  renderBrainBanner();
+  renderSuggestions();
+  renderChat();
+  renderRunsWorkspace();
+  renderMetricsWorkspace();
+  renderOperationsWorkspace();
+  renderRightRail();
+  renderCommandPalette();
+  renderModeBadge();
+  focusChatComposer();
+}
+
+async function sendChatStream(message, options = {}) {
+  state.streamingTurn = {
+    id: "pending",
+    message,
+    response: "",
+    intent: options.intent || "conversation",
+    metadata: {
+      mode: options.execute ? "executing" : "chat",
+      actions: [],
+    },
+    pending: true,
+  };
+  renderChat();
+
+  const payload = {
+    message,
+    execute: Boolean(options.execute),
+    auto_approve: Boolean(options.autoApprove),
+    project_name: state.activeProject,
+  };
+  if (options.intent) {
+    payload.intent = options.intent;
+  }
+
+  const response = await fetch("/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok || !response.body) {
+    const body = await response.text();
+    state.streamingTurn.response = body || "The chat request failed.";
+    state.streamingTurn.pending = false;
+    renderChat();
+    throw new Error(body || `Request failed: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResponse = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const event = JSON.parse(line);
+      if (event.type === "meta") {
+        state.streamingTurn.intent = event.intent || state.streamingTurn.intent;
+        state.streamingTurn.metadata.mode = event.mode || state.streamingTurn.metadata.mode;
+        state.streamingTurn.metadata.actions = event.actions || [];
+      } else if (event.type === "delta") {
+        state.streamingTurn.response += event.delta || "";
+      } else if (event.type === "done") {
+        finalResponse = event.response || null;
+        if (finalResponse) {
+          state.streamingTurn = {
+            id: finalResponse.id || "pending-final",
+            message,
+            response: finalResponse.reply || "",
+            intent: finalResponse.intent || "conversation",
+            metadata: {
+              mode: finalResponse.mode || "chat",
+              actions: finalResponse.actions || [],
+              result: finalResponse.result || null,
+            },
+            pending: false,
+          };
+        }
+      } else if (event.type === "error") {
+        state.streamingTurn.response += `${state.streamingTurn.response ? "\n" : ""}${event.error || "Chat stream failed."}`;
+        state.streamingTurn.pending = false;
+        state.streamingTurn.metadata.mode = "blocked";
+      }
+      renderChat();
+    }
+  }
+
+  if (buffer.trim()) {
+    try {
+      const event = JSON.parse(buffer.trim());
+      if (event.type === "done" && event.response) {
+        finalResponse = event.response;
+      }
+    } catch (_error) {
+      // ignore trailing parse failures from partial buffers
+    }
+  }
+
+  if (finalResponse) {
+    state.chatHistory.push({
+      id: finalResponse.id || Date.now(),
+      message,
+      response: finalResponse.reply || "",
+      intent: finalResponse.intent || "conversation",
+      metadata: {
+        mode: finalResponse.mode || "chat",
+        actions: finalResponse.actions || [],
+        result: finalResponse.result || null,
+      },
+    });
+  }
+
+  state.streamingTurn = null;
+  renderChat();
+  await refreshAll();
+}
+
+function upsertActivity(activity) {
+  const index = state.activities.findIndex((item) => item.agent === activity.agent);
+  if (index >= 0) {
+    state.activities[index] = activity;
+  } else {
+    state.activities.push(activity);
+  }
+}
+
+function addTimelineEvent(event) {
+  state.timeline.unshift(event);
+  state.timeline = state.timeline.slice(0, 80);
+}
+
+function connectWebSocket() {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+  socket.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.type === "log" && payload.payload) {
+      state.logs.push(payload.payload);
+      renderTimelineAndLogs();
+      return;
+    }
+    if (payload.type === "agent_activity" && payload.payload) {
+      upsertActivity(payload.payload);
+      renderActivities();
+      renderRunGraph();
+      return;
+    }
+    if (payload.type === "timeline" && payload.payload) {
+      addTimelineEvent(payload.payload);
+      renderTimelineAndLogs();
+      renderRunGraph();
+      return;
+    }
+    if (payload.type !== "heartbeat") {
+      refreshAll().catch(console.error);
+    }
+  };
+  socket.onclose = () => {
+    window.setTimeout(connectWebSocket, 1500);
+  };
+}
+
+function bindStaticEvents() {
+  qs("refreshButton")?.addEventListener("click", () => {
+    refreshAll().catch(console.error);
+  });
+
+  qs("chatForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const input = qs("chatInput");
+    const autoApprove = qs("autoApproveToggle")?.checked;
+    const message = input?.value.trim();
+    if (!message) return;
+    input.value = "";
+    await sendChatStream(message, { execute: false, autoApprove });
+    focusChatComposer(true);
+  });
+
+  qs("chatInput")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      qs("chatForm")?.requestSubmit();
+    }
+  });
+
+  document.querySelectorAll("button[data-prompt-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.promptAction;
+      const prompts = {
+        plan: "plan the next move for ",
+        build: "build ",
+        code: "code ",
+        tests: "test ",
+        audit: "audit ",
+      };
+      seedPrompt(prompts[action] || "");
+    });
+  });
+
+  document.querySelectorAll("button[data-collapse-target]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const targetId = button.dataset.collapseTarget;
+      if (!targetId) return;
+      const target = qs(targetId);
+      if (!target) return;
+      const collapsed = target.classList.toggle("hidden");
+      state.collapsedPanels[targetId] = collapsed;
+    });
+  });
+
+  qs("commandPaletteButton")?.addEventListener("click", openCommandPalette);
+  qs("commandPalette")?.addEventListener("click", (event) => {
+    if (event.target === qs("commandPalette")) {
+      closeCommandPalette();
+    }
+  });
+  qs("commandPaletteInput")?.addEventListener("input", renderCommandPalette);
+  qs("openDashboardButton")?.addEventListener("click", openFullDashboard);
+
+  document.addEventListener("keydown", (event) => {
+    if (event.metaKey && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      if (state.commandPaletteOpen) {
+        closeCommandPalette();
+      } else {
+        openCommandPalette();
+      }
+      return;
+    }
+    if (event.key === "Escape" && state.commandPaletteOpen) {
+      closeCommandPalette();
+      return;
+    }
+    if (event.metaKey && !event.shiftKey) {
+      const key = event.key.toLowerCase();
+      if (key === "1") {
+        event.preventDefault();
+        setCenterView("chat");
+      } else if (key === "2") {
+        event.preventDefault();
+        setCenterView("runs");
+      } else if (key === "3") {
+        event.preventDefault();
+        setCenterView("metrics");
+      } else if (key === "4") {
+        event.preventDefault();
+        setCenterView("operations");
+      } else if (key === "r") {
+        event.preventDefault();
+        seedPrompt("build ");
+      }
+    }
+  });
+}
+
+bindStaticEvents();
+applyTauriChatLayout();
+refreshAll().catch(console.error);
+connectWebSocket();
+window.setInterval(() => refreshAll().catch(console.error), 5000);

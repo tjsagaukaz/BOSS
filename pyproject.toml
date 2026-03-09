@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boss-ai"
+version = "0.1.0"
+description = "Builder Orchestration System for Sagau"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "openai",
+  "anthropic",
+  "langchain",
+  "langgraph",
+  "rich",
+  "typer",
+  "tqdm",
+  "watchdog",
+  "python-dotenv",
+  "PyYAML",
+  "fastapi",
+  "uvicorn",
+  "SpeechRecognition",
+]
+
+[project.scripts]
+boss = "cli.boss_cli:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["boss*", "cli*"]

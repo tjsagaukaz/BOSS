@@ -1,0 +1,31 @@
+name: ext_flask_feature
+project_name: ext_flask
+stop_on_failure: true
+required_python: ">=3.10"
+python_bin: python3.10
+setup_create_venv: true
+skip_audit: true
+setup_commands:
+  - "{python_bin} -m pip install setuptools wheel"
+  - "{python_bin} -m pip install ."
+tasks:
+  - name: add_cli_docs_example
+    mode: code
+    description: "Add examples/boss_cli_example.py that creates a tiny Flask CLI app factory example and can be imported without side effects."
+    sandbox_mode: auto
+    auto_approve: true
+    max_iterations: 1
+    allowed_paths:
+      - examples/
+    expected_files:
+      - examples/boss_cli_example.py
+    required_changed_files:
+      - examples/boss_cli_example.py
+    expected_file_contains:
+      examples/boss_cli_example.py:
+        - "from flask import Flask"
+        - "def create_app()"
+    validation_commands:
+      - "{python_bin} -m py_compile examples/boss_cli_example.py"
+    direct_engineer: true
+    plan_override: "Create examples/boss_cli_example.py directly. Keep the example self-contained and import-safe."

@@ -1,0 +1,29 @@
+name: ext_typer_docs_example
+project_name: ext_typer
+stop_on_failure: true
+required_python: ">=3.10"
+python_bin: python3.11
+setup_create_venv: true
+setup_commands:
+  - "{python_bin} -m pip install -e ."
+tasks:
+  - name: add_docs_src_example
+    mode: code
+    description: "Add docs_src/testing/tutorial_boss_app.py with a small Typer app example that demonstrates a --verbose option."
+    sandbox_mode: auto
+    auto_approve: true
+    max_iterations: 1
+    allowed_paths:
+      - docs_src/testing/
+    expected_files:
+      - docs_src/testing/tutorial_boss_app.py
+    required_changed_files:
+      - docs_src/testing/tutorial_boss_app.py
+    expected_file_contains:
+      docs_src/testing/tutorial_boss_app.py:
+        - "import typer"
+        - "--verbose"
+    validation_commands:
+      - "{python_bin} -m py_compile docs_src/testing/tutorial_boss_app.py"
+    direct_engineer: true
+    plan_override: "Create the docs example directly in docs_src/testing. Keep the example concise and runnable."

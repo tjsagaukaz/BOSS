@@ -1,0 +1,855 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>BOSS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --boss-bg: #000000;
+        --boss-center: #000000;
+        --boss-panel: #0B0B0B;
+        --boss-panel-secondary: #111111;
+        --boss-sidebar: #000000;
+        --boss-header: #000000;
+        --boss-border: #1A1A1A;
+        --boss-text: #E5E5E5;
+        --boss-muted: #7A7A7A;
+        --boss-accent: #FF3B3B;
+        --boss-accent-hover: #FF5252;
+        --boss-accent-muted: #8A1C1C;
+        --boss-warn: #F59E0B;
+        --boss-error: #EF4444;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--boss-bg);
+        color: var(--boss-text);
+        font-family: "Inter", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      code,
+      pre,
+      textarea,
+      input[type="text"] {
+        font-family: "JetBrains Mono", monospace;
+      }
+
+      *::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+
+      *::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      *::-webkit-scrollbar-thumb {
+        background: rgba(148, 163, 184, 0.16);
+        border: 2px solid transparent;
+        border-radius: 999px;
+        background-clip: padding-box;
+      }
+
+      #appShell {
+        display: grid;
+        grid-template-rows: 46px minmax(0, 1fr);
+        height: 100vh;
+      }
+
+      #statusBar {
+        display: flex;
+        align-items: center;
+        min-height: 46px;
+        padding: 0 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        background: var(--boss-header);
+        position: relative;
+      }
+
+      #statusBar::after {
+        content: "";
+        position: absolute;
+        left: 14%;
+        right: 14%;
+        bottom: -1px;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255, 59, 59, 0.92), transparent);
+        opacity: 0.35;
+      }
+
+      #shellRoot {
+        min-height: 0;
+      }
+
+      #layoutGrid {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+        height: 100%;
+        min-height: 0;
+      }
+
+      #layoutGrid.left-collapsed {
+        grid-template-columns: 72px minmax(0, 1fr);
+      }
+
+      #leftRail {
+        min-height: 0;
+        border-right: 1px solid rgba(255, 255, 255, 0.03);
+        background: var(--boss-sidebar);
+      }
+
+      #leftRailScroll {
+        height: 100%;
+        overflow: auto;
+        padding: 12px 12px 18px;
+      }
+
+      #centerRail {
+        min-width: 0;
+        min-height: 0;
+        background: var(--boss-center);
+        position: relative;
+        overflow: hidden;
+      }
+
+      #centerRail.shell-thinking::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -30%;
+        width: 42%;
+        height: 100%;
+        background: linear-gradient(
+          90deg,
+          rgba(0, 0, 0, 0) 0%,
+          rgba(255, 59, 59, 0.02) 22%,
+          rgba(255, 255, 255, 0.06) 48%,
+          rgba(255, 59, 59, 0.035) 72%,
+          rgba(0, 0, 0, 0) 100%
+        );
+        filter: blur(22px);
+        pointer-events: none;
+        animation: bossSpotlightSweep 2.8s ease-in-out infinite;
+        opacity: 0.72;
+      }
+
+      @keyframes bossSpotlightSweep {
+        0%,
+        100% {
+          transform: translateX(0);
+          opacity: 0.32;
+        }
+        50% {
+          transform: translateX(210%);
+          opacity: 0.88;
+        }
+      }
+
+      #centerRailLayout {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        height: 100%;
+        min-height: 0;
+        position: relative;
+        z-index: 1;
+      }
+
+      #brainBanner {
+        padding: 14px 28px 0;
+      }
+
+      #executionStrip {
+        padding: 10px 28px 0;
+      }
+
+      .execution-strip-inner {
+        max-width: 860px;
+        margin: 0 auto;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .execution-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 30px;
+        padding: 0 11px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--boss-muted);
+        font-size: 12px;
+        transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+      }
+
+      .execution-chip strong {
+        color: var(--boss-text);
+        font-weight: 500;
+      }
+
+      .execution-chip.active {
+        border-color: rgba(34, 197, 94, 0.18);
+        background: rgba(34, 197, 94, 0.06);
+        color: #d1fae5;
+      }
+
+      .execution-chip.waiting {
+        color: rgba(156, 163, 175, 0.82);
+      }
+
+      .execution-chip .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: rgba(156, 163, 175, 0.72);
+      }
+
+      .execution-chip.active .dot {
+        background: var(--boss-accent);
+      }
+
+      .execution-chip.waiting .dot {
+        background: rgba(156, 163, 175, 0.56);
+      }
+
+      #chatScroll {
+        min-height: 0;
+        overflow: auto;
+      }
+
+      #chatMessages {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 20px 28px 40px;
+        min-height: 100%;
+      }
+
+      #composerArea {
+        border-top: 1px solid rgba(255, 255, 255, 0.03);
+        padding: 12px 28px 18px;
+        background: rgba(0, 0, 0, 0.98);
+      }
+
+      #composerInner {
+        max-width: 860px;
+        margin: 0 auto;
+      }
+
+      .sidebar-section + .sidebar-section {
+        margin-top: 18px;
+      }
+
+      .sidebar-label {
+        margin-bottom: 6px;
+        font-size: 10px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: rgba(156, 163, 175, 0.72);
+      }
+
+      .sidebar-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        padding: 8px 10px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--boss-muted);
+        text-align: left;
+        transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+      }
+
+      .sidebar-row:hover {
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--boss-text);
+      }
+
+      .sidebar-row.active {
+        background: rgba(255, 59, 59, 0.08);
+        color: var(--boss-text);
+        box-shadow:
+          inset 2px 0 0 var(--boss-accent),
+          0 0 12px rgba(255, 59, 59, 0.16);
+      }
+
+      .sidebar-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 12px;
+        flex: 0 0 12px;
+        color: rgba(156, 163, 175, 0.86);
+        font-size: 11px;
+      }
+
+      .sidebar-copy {
+        min-width: 0;
+      }
+
+      .sidebar-copy strong {
+        display: block;
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--boss-text);
+      }
+
+      .sidebar-copy span {
+        display: block;
+        margin-top: 1px;
+        font-size: 11px;
+        color: rgba(156, 163, 175, 0.72);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #leftRail.collapsed .sidebar-copy,
+      #leftRail.collapsed .sidebar-label,
+      #leftRail.collapsed #sidebarHeaderCopy,
+      #leftRail.collapsed #chatSessionList {
+        display: none !important;
+      }
+
+      #leftRail.collapsed .sidebar-row {
+        justify-content: center;
+      }
+
+      .ghost-button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 32px;
+        height: 32px;
+        padding: 0 10px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--boss-muted);
+        transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+      }
+
+      .ghost-button:hover {
+        border-color: rgba(255, 255, 255, 0.12);
+        color: var(--boss-text);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .context-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 999px;
+        color: var(--boss-muted);
+        font-size: 11px;
+        background: transparent;
+      }
+
+      .context-chip strong {
+        margin-left: 5px;
+        color: var(--boss-text);
+        font-weight: 500;
+      }
+
+      .suggestion-chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 0 12px;
+        border: 1px solid rgba(255, 255, 255, 0.045);
+        border-radius: 999px;
+        background: transparent;
+        color: var(--boss-text);
+        font-size: 12px;
+        transition: border-color 140ms ease, background 140ms ease, color 140ms ease, transform 140ms ease;
+      }
+
+      .suggestion-chip:hover {
+        border-color: rgba(255, 82, 82, 0.42);
+        background: rgba(255, 59, 59, 0.06);
+        transform: translateY(-1px);
+      }
+
+      .chat-turn + .chat-turn {
+        margin-top: 32px;
+      }
+
+      .chat-empty {
+        padding-top: 8px;
+      }
+
+      .chat-empty-title {
+        font-size: 24px;
+        font-weight: 600;
+        line-height: 1.25;
+        color: var(--boss-text);
+      }
+
+      .chat-empty-copy {
+        margin-top: 10px;
+        max-width: 640px;
+        font-size: 15px;
+        line-height: 1.8;
+        color: var(--boss-muted);
+      }
+
+      .chat-empty-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .chat-label {
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--boss-muted);
+      }
+
+      .chat-body {
+        margin-top: 8px;
+        font-size: 16px;
+        line-height: 1.82;
+        color: var(--boss-text);
+        white-space: normal;
+      }
+
+      .chat-user {
+        color: var(--boss-text);
+      }
+
+      .result-inline {
+        margin-top: 12px;
+        padding-left: 12px;
+        border-left: 2px solid rgba(34, 197, 94, 0.24);
+        font-size: 13px;
+        color: var(--boss-muted);
+      }
+
+      .action-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .action-pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 0 10px;
+        border: 1px solid rgba(255, 255, 255, 0.045);
+        border-radius: 999px;
+        background: transparent;
+        color: var(--boss-text);
+        font-size: 12px;
+        transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+      }
+
+      .action-pill:hover {
+        border-color: rgba(255, 82, 82, 0.42);
+        background: rgba(255, 59, 59, 0.06);
+      }
+
+      .message-fade-in {
+        animation: messageIn 150ms ease-out;
+      }
+
+      @keyframes messageIn {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      #chatInput {
+        width: 100%;
+        min-height: 132px;
+        resize: none;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+        border-radius: 12px;
+        background: var(--boss-panel);
+        color: var(--boss-text);
+        outline: none;
+        padding: 16px 18px;
+        font-size: 15px;
+        line-height: 1.7;
+        transition: border-color 140ms ease, background 140ms ease;
+      }
+
+      #chatInput:focus {
+        border-color: rgba(255, 59, 59, 0.48);
+        background: var(--boss-panel-secondary);
+        box-shadow: 0 0 10px rgba(255, 59, 59, 0.2);
+      }
+
+      .brain-line {
+        color: var(--boss-muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .brain-line strong {
+        color: var(--boss-text);
+        font-weight: 500;
+      }
+
+      .chat-meta {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--boss-muted);
+      }
+
+      .result-block {
+        margin-top: 12px;
+        padding-left: 12px;
+        border-left: 2px solid rgba(255, 59, 59, 0.24);
+        color: var(--boss-muted);
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      #diffViewerFiles {
+        overflow-y: auto;
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
+        background: rgba(0, 0, 0, 0.28);
+      }
+
+      .diff-file-row {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        width: 100%;
+        padding: 12px 14px;
+        border: 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        background: transparent;
+        color: var(--boss-muted);
+        text-align: left;
+        transition: background 140ms ease, color 140ms ease;
+      }
+
+      .diff-file-row:hover,
+      .diff-file-row.active {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--boss-text);
+      }
+
+      .diff-file-name {
+        font-size: 13px;
+        font-weight: 500;
+        color: var(--boss-text);
+      }
+
+      .diff-file-status {
+        font-size: 11px;
+        color: var(--boss-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+      }
+
+      .diff-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100%;
+        padding: 24px;
+        color: var(--boss-muted);
+        font-size: 14px;
+        text-align: center;
+      }
+
+      .diff-code {
+        min-height: 100%;
+        padding: 18px 22px;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 12px;
+        line-height: 1.7;
+        color: var(--boss-text);
+        white-space: pre-wrap;
+      }
+
+      .diff-line {
+        display: block;
+        margin: 0;
+        padding: 0 10px;
+        border-radius: 6px;
+      }
+
+      .diff-line.meta {
+        color: #93c5fd;
+      }
+
+      .diff-line.add {
+        background: rgba(34, 197, 94, 0.08);
+        color: #dcfce7;
+      }
+
+      .diff-line.remove {
+        background: rgba(239, 68, 68, 0.08);
+        color: #fecaca;
+      }
+
+      .brain-kicker {
+        font-size: 12px;
+        font-weight: 500;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(255, 82, 82, 0.92);
+      }
+
+      .brain-title {
+        margin-top: 6px;
+        font-size: 20px;
+        font-weight: 600;
+        line-height: 1.25;
+        color: var(--boss-text);
+      }
+
+      .brain-subtitle {
+        margin-top: 4px;
+        font-size: 12px;
+        color: var(--boss-muted);
+      }
+
+      .thinking-shell {
+        position: relative;
+        margin-top: 8px;
+        padding: 16px 18px;
+        border: 1px solid rgba(255, 255, 255, 0.035);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.012);
+        overflow: hidden;
+      }
+
+      .thinking-shell::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -35%;
+        width: 46%;
+        height: 100%;
+        background: linear-gradient(
+          90deg,
+          rgba(0, 0, 0, 0) 0%,
+          rgba(255, 59, 59, 0.03) 26%,
+          rgba(255, 255, 255, 0.08) 50%,
+          rgba(255, 59, 59, 0.04) 74%,
+          rgba(0, 0, 0, 0) 100%
+        );
+        filter: blur(14px);
+        pointer-events: none;
+        animation: bossThinkingSweep 2.6s ease-in-out infinite;
+      }
+
+      @keyframes bossThinkingSweep {
+        0%,
+        100% {
+          transform: translateX(0);
+          opacity: 0.24;
+        }
+        50% {
+          transform: translateX(235%);
+          opacity: 0.95;
+        }
+      }
+
+      .thinking-shell > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .thinking-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+        font-size: 12px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--boss-muted);
+      }
+
+      .thinking-dots {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .thinking-dots span {
+        width: 5px;
+        height: 5px;
+        border-radius: 999px;
+        background: rgba(255, 82, 82, 0.9);
+        animation: bossDotPulse 1.15s ease-in-out infinite;
+      }
+
+      .thinking-dots span:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+
+      .thinking-dots span:nth-child(3) {
+        animation-delay: 0.3s;
+      }
+
+      @keyframes bossDotPulse {
+        0%,
+        100% {
+          opacity: 0.3;
+          transform: translateY(0);
+        }
+        50% {
+          opacity: 1;
+          transform: translateY(-1px);
+        }
+      }
+
+      @media (max-width: 920px) {
+        #layoutGrid,
+        #layoutGrid.left-collapsed {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        #leftRail {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="appShell">
+      <header id="statusBar"></header>
+
+      <div id="shellRoot">
+        <div id="layoutGrid">
+          <aside id="leftRail">
+            <div id="leftRailScroll">
+              <div class="flex items-center justify-between gap-3">
+                <div id="sidebarHeaderCopy">
+                  <p class="text-[10px] uppercase tracking-[0.32em]" style="color:#FF5252;">BOSS</p>
+                </div>
+                <button id="leftRailToggle" class="ghost-button" type="button" title="Toggle sidebar">≡</button>
+              </div>
+
+              <div class="sidebar-section">
+                <button id="newChatButton" class="sidebar-row" type="button">
+                  <span class="sidebar-icon">＋</span>
+                  <span class="sidebar-copy">
+                    <strong>New chat</strong>
+                  </span>
+                </button>
+              </div>
+
+              <div class="sidebar-section">
+                <p class="sidebar-label">Projects</p>
+                <div id="projectList" class="space-y-1"></div>
+              </div>
+
+              <div class="sidebar-section">
+                <p class="sidebar-label">Chats</p>
+                <div id="chatSessionList" class="mt-2 space-y-1"></div>
+              </div>
+
+              <div class="sidebar-section">
+                <p class="sidebar-label">Navigate</p>
+                <div id="sidebarNav" class="space-y-1"></div>
+              </div>
+            </div>
+          </aside>
+
+          <main id="centerRail">
+            <div id="centerRailLayout">
+              <section id="brainBanner"></section>
+              <section id="executionStrip" class="hidden"></section>
+
+              <section id="chatScroll">
+                <div id="chatMessages"></div>
+              </section>
+
+              <section id="composerArea">
+                <div id="composerInner">
+                  <div id="suggestionsPanel" class="mb-3 flex flex-wrap gap-2"></div>
+
+                  <form id="chatForm" class="space-y-3">
+                    <textarea id="chatInput" rows="4" placeholder="Talk to BOSS…"></textarea>
+                    <div class="flex items-center justify-between gap-3">
+                      <label class="flex items-center gap-2 text-sm text-slate-400">
+                        <input id="autoApproveToggle" type="checkbox" class="rounded border-slate-700 bg-slate-950">
+                        Auto-approve code changes
+                      </label>
+                      <div class="flex items-center gap-2">
+                        <button id="commandPaletteButton" class="ghost-button" type="button">⌘K</button>
+                        <button id="stopStreamButton" type="button" class="ghost-button hidden" style="padding-inline:14px;color:#fff1f2;border-color:rgba(255,82,82,.28);background:rgba(255,59,59,.12);box-shadow:0 0 12px rgba(255,59,59,.18);">Stop</button>
+                        <button id="sendButton" type="submit" class="ghost-button" style="padding-inline:14px;color:#fff;background:#FF3B3B;border-color:#FF3B3B;box-shadow:0 0 12px rgba(255,59,59,.3);">Send</button>
+                      </div>
+                    </div>
+                  </form>
+                </div>
+              </section>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+
+    <div id="commandPalette" class="fixed inset-0 z-50 hidden bg-slate-950/72" style="backdrop-filter: blur(18px);">
+      <div class="mx-auto mt-[11vh] w-[min(760px,calc(100vw-32px))] rounded-[16px] border border-slate-800 bg-slate-900/96 shadow-2xl shadow-slate-950/60">
+        <div class="border-b border-slate-800 px-5 py-4">
+          <input
+            id="commandPaletteInput"
+            type="text"
+            placeholder="Jump to anything… build legion, inspect last run, open project brain"
+            class="w-full border-0 bg-transparent text-base text-slate-100 outline-none placeholder:text-slate-500"
+          >
+        </div>
+        <div id="commandPaletteResults" class="max-h-[24rem] overflow-y-auto p-3"></div>
+      </div>
+    </div>
+
+    <div id="diffViewerModal" class="fixed inset-0 z-40 hidden bg-slate-950/78" style="backdrop-filter: blur(16px);">
+      <div class="mx-auto mt-[6vh] flex h-[82vh] w-[min(1120px,calc(100vw-40px))] overflow-hidden rounded-[18px] border border-slate-800 bg-slate-900/98 shadow-2xl shadow-slate-950/70">
+        <aside id="diffViewerFiles" class="w-[300px] min-w-[260px]"></aside>
+        <section class="flex min-w-0 flex-1 flex-col bg-slate-950/70">
+          <div class="flex items-center justify-between gap-4 border-b border-slate-800 px-5 py-4">
+            <div class="min-w-0">
+              <p class="text-[10px] uppercase tracking-[0.28em] text-slate-500">Diff Viewer</p>
+              <p id="diffViewerTitle" class="mt-1 truncate text-sm font-medium text-slate-100">Diff</p>
+            </div>
+            <button id="diffViewerClose" type="button" class="ghost-button">Close</button>
+          </div>
+          <div id="diffViewerContent" class="min-h-0 flex-1 overflow-auto"></div>
+        </section>
+      </div>
+    </div>
+
+    <script src="/ui/app.js?v=chat-ui-20260308b"></script>
+  </body>
+</html>

@@ -1,0 +1,29 @@
+name: ext_fastapi_docs_example
+project_name: ext_fastapi
+stop_on_failure: true
+required_python: ">=3.10"
+python_bin: python3.11
+setup_create_venv: true
+setup_commands:
+  - "{python_bin} -m pip install -e ."
+tasks:
+  - name: add_request_id_docs_example
+    mode: code
+    description: "Add docs_src/advanced_middleware/tutorial_boss_request_id.py with a minimal FastAPI request-id middleware example that keeps the public tutorial style used in the repo."
+    sandbox_mode: auto
+    auto_approve: true
+    max_iterations: 1
+    allowed_paths:
+      - docs_src/advanced_middleware/
+    expected_files:
+      - docs_src/advanced_middleware/tutorial_boss_request_id.py
+    required_changed_files:
+      - docs_src/advanced_middleware/tutorial_boss_request_id.py
+    expected_file_contains:
+      docs_src/advanced_middleware/tutorial_boss_request_id.py:
+        - "from fastapi import FastAPI"
+        - "x-request-id"
+    validation_commands:
+      - "{python_bin} -m py_compile docs_src/advanced_middleware/tutorial_boss_request_id.py"
+    direct_engineer: true
+    plan_override: "Create the tutorial example file directly under docs_src/advanced_middleware. Keep it small and consistent with the repo's docs examples."

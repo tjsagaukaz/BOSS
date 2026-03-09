@@ -1,0 +1,16 @@
+name: legion-smoke
+project_name: legion
+mode: code
+auto_approve: true
+max_iterations: 1
+stop_on_failure: false
+tasks:
+  - name: no_op_inspection
+    description: "Inspect the active project and return a no-op implementation summary. Do not modify files or create files."
+    expected_output_contains:
+      - "no-op"
+  - name: audit_placeholder
+    mode: audit
+    description: "Audit the active project for defects and risks."
+    expected_output_contains:
+      - "AUDIT_STATUS"
