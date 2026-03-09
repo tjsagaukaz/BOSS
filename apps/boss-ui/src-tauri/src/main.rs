@@ -58,8 +58,16 @@ fn backend_reachable() -> bool {
 }
 
 fn backend_compatible() -> bool {
-    match backend_get("/permissions") {
+    let permissions_ok = match backend_get("/permissions") {
         Ok(body) => body.contains("\"full_access_mode\""),
+        Err(_) => false,
+    };
+    if !permissions_ok {
+        return false;
+    }
+
+    match backend_get("/command-center") {
+        Ok(body) => body.contains("\"projects\"") && body.contains("\"workspace\"") && body.contains("\"history\""),
         Err(_) => false,
     }
 }
