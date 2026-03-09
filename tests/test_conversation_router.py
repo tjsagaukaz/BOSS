@@ -138,7 +138,22 @@ class _FakeOrchestrator:
 
     def build(self, task: str, auto_approve: bool = False, project_name: str | None = None, commit_changes: bool = True):
         self.build_calls.append(task)
-        return SimpleNamespace(status="completed", task_id=7, final_result=f"Built {task}", changed_files=["app.py"])
+        return SimpleNamespace(
+            status="completed",
+            task_id=7,
+            goal=task,
+            final_result=f"Built {task}",
+            changed_files=["app.py"],
+            step_results=[
+                SimpleNamespace(
+                    step_title="Implement auth middleware",
+                    status="completed",
+                    iterations=1,
+                )
+            ],
+            plan=SimpleNamespace(steps=["Implement auth middleware"]),
+            metadata={},
+        )
 
     def ship(
         self,
@@ -330,6 +345,9 @@ def test_conversation_router_supports_slash_build_commands(tmp_path):
     assert response["mode"] == "executed"
     assert response["conversation_type"] == "execution"
     assert orchestrator.build_calls == ["auth system"]
+    assert "run id" not in response["reply"].lower()
+    assert response["result"]["run_kind"] == "build"
+    assert response["result"]["internal_summary"]["details_available"] is True
 
 
 def test_conversation_router_supports_benchmark_intent(tmp_path):

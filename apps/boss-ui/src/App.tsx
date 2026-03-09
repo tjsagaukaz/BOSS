@@ -1,18 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { startTransition, useEffect, useRef, useState } from "react";
 
-import { loadCommandCenter, postJson, setActiveProject, streamChat } from "./api";
+import { fetchRunDetails, loadCommandCenter, postJson, setActiveProject, streamChat } from "./api";
 import type {
   ActivityItem,
   BrainSnapshot,
+  BuildTaskStep,
+  ChatResultPayload,
   ChatHistoryTurn,
   CommandCenterSnapshot,
   HealthSnapshot,
+  InternalRunSummary,
   MetricSnapshot,
   PermissionSnapshot,
   ProjectCatalogItem,
   RecommendationItem,
   RiskItem,
+  RunDetailsResponse,
   RootSnapshot,
   RunSummary,
   StreamEvent,
@@ -39,6 +43,7 @@ const QUICK_PROMPTS = [
 ];
 
 const REFRESH_INTERVAL_MS = 5000;
+const INTERNAL_AGENTS = new Set(["architect", "engineer", "test", "auditor"]);
 
 const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   active_project: "__workspace__",
@@ -188,11 +193,105 @@ function workspaceTestSummary(workspace: WorkspaceSnapshot): string {
 }
 
 function latestActivitySummary(activities: ActivityItem[], timeline: TimelineEvent[]): string {
-  const activeMessage = activities[0]?.message || activities[0]?.status;
-  if (activeMessage) {
-    return activeMessage;
+  const lastEvent = timeline[0];
+  if (lastEvent?.title || lastEvent?.message) {
+    return lastEvent.message || lastEvent.title || "Waiting for the next task.";
   }
-  return timeline[0]?.message || timeline[0]?.title || "Waiting for the next task.";
+  return "Waiting for the next task.";
+}
+
+function latestWorkSummary(runs: RunSummary[], timeline: TimelineEvent[]): string {
+  const running = runs.find((item) => {
+    const status = String(item.status || "").toLowerCase();
+    return status === "running" || status === "queued";
+  });
+  if (running) {
+    return `BOSS is working on ${running.title || "the active run"}.`;
+  }
+  const latestRun = runs[0];
+  if (latestRun) {
+    return `${formatStatus(latestRun.status)}: ${latestRun.title || "Recent run"}.`;
+  }
+  return latestActivitySummary([], timeline);
+}
+
+function isInternalTimelineEvent(event: TimelineEvent): boolean {
+  return INTERNAL_AGENTS.has(String(event.agent || "").toLowerCase());
+}
+
+function turnResult(turn: ChatTurn): ChatResultPayload | null {
+  const metadata = turn.metadata ?? {};
+  const result = metadata.result;
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+  return result as ChatResultPayload;
+}
+
+function hasBuildRunDetails(result: ChatResultPayload | null): result is ChatResultPayload & {
+  task_id: number;
+  run_kind: string;
+  internal_summary: InternalRunSummary;
+} {
+  return Boolean(
+    result &&
+      typeof result.task_id === "number" &&
+      result.run_kind &&
+      result.internal_summary?.details_available,
+  );
+}
+
+function trimText(value: string | undefined, limit = 240): string {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1).trimEnd()}…`;
+}
+
+function formatFileSummary(files: string[] | undefined, limit = 3): string {
+  const entries = (files || []).filter(Boolean);
+  if (!entries.length) return "No file changes recorded.";
+  if (entries.length <= limit) return entries.join(", ");
+  return `${entries.slice(0, limit).join(", ")} +${entries.length - limit} more`;
+}
+
+function testOutputSummary(step: BuildTaskStep): string {
+  const output = step.test_output || {};
+  const passed = output.passed;
+  const message = typeof output.message === "string" ? output.message : "";
+  const failure = typeof output.failure_summary === "string" ? output.failure_summary : "";
+  if (typeof passed === "boolean") {
+    return passed ? "Tests passed." : failure || message || "Tests failed.";
+  }
+  return message || failure || "No dedicated test result captured.";
+}
+
+function buildRunSummaryCopy(summary: InternalRunSummary): string {
+  const totalSteps = Number(summary.total_steps || 0);
+  const completedSteps = Number(summary.completed_steps || 0);
+  const failedSteps = Number(summary.failed_steps || 0);
+  const retries = Number(summary.retries || 0);
+  const changedFilesCount = Number(summary.changed_files_count || 0);
+  const parts: string[] = [];
+  if (totalSteps) {
+    parts.push(`Architect planned ${totalSteps} step${totalSteps === 1 ? "" : "s"}.`);
+    parts.push(`Execution completed ${completedSteps}/${totalSteps} step${totalSteps === 1 ? "" : "s"}.`);
+  } else {
+    parts.push("Execution details are available for this run.");
+  }
+  if (failedSteps) {
+    parts.push(`${failedSteps} step${failedSteps === 1 ? "" : "s"} still need follow-up.`);
+  }
+  if (retries) {
+    parts.push(`${retries} retr${retries === 1 ? "y" : "ies"} across the run.`);
+  }
+  if (changedFilesCount) {
+    parts.push(`Changed ${changedFilesCount} file${changedFilesCount === 1 ? "" : "s"}.`);
+  }
+  if (summary.shipping_status) {
+    parts.push(`Shipping is ${summary.shipping_status.replace(/_/g, " ")}.`);
+  }
+  return parts.join(" ");
 }
 
 export function App() {
@@ -518,7 +617,7 @@ export function App() {
 
   const activeProjectMeta = projects.find((project) => project.key === activeProject) ?? null;
   const chatTurns: ChatTurn[] = streamingTurn ? [...chatHistory, streamingTurn] : chatHistory;
-  const latestActivity = latestActivitySummary(activities, timeline);
+  const latestActivity = latestWorkSummary(runs, timeline);
   const focusHeadline =
     brain.brain.current_focus || brain.brain.mission || "Tell BOSS what you want done.";
   const focusDescription =
@@ -542,24 +641,49 @@ export function App() {
     tone: item.severity?.toLowerCase() === "high" ? "bad" : "warn",
   }));
 
-  const recentActivityItems: SummaryListItem[] = activities.length
+  const recentWorkItems: SummaryListItem[] = runs.length
+    ? runs.slice(0, 4).map((run) => ({
+        title: run.title || String(run.identifier || "Untitled run"),
+        detail: [formatStatus(run.status), run.project_name || "workspace"].filter(Boolean).join(" · "),
+        meta: formatTimestamp(run.timestamp),
+        tone: runTone(run.status),
+      }))
+    : timeline
+        .filter((event) => !isInternalTimelineEvent(event))
+        .slice(0, 4)
+        .map((event) => ({
+          title: event.title || "Event",
+          detail: event.message || event.status || "Recent activity",
+          meta: formatTimestamp(event.timestamp),
+          tone:
+            event.status === "failed"
+              ? "bad"
+              : event.status === "completed"
+                ? "good"
+                : "neutral",
+        }));
+
+  const agentActivityItems: SummaryListItem[] = activities.length
     ? activities.slice(0, 4).map((item) => ({
         title: item.agent,
         detail: item.message || item.status || "Idle",
         meta: item.project_name || "workspace",
-        tone: item.status === "running" ? "good" : "neutral",
+        tone: item.status === "running" ? "warn" : item.status === "failed" ? "bad" : "neutral",
       }))
-    : timeline.slice(0, 4).map((event) => ({
-        title: event.title || event.agent || "Event",
-        detail: event.message || event.status || "Recent activity",
-        meta: formatTimestamp(event.timestamp),
-        tone:
-          event.status === "failed"
-            ? "bad"
-            : event.status === "completed"
-              ? "good"
-              : "neutral",
-      }));
+    : timeline
+        .filter((event) => isInternalTimelineEvent(event))
+        .slice(0, 4)
+        .map((event) => ({
+          title: event.agent || event.title || "Agent",
+          detail: event.message || event.status || "Idle",
+          meta: formatTimestamp(event.timestamp),
+          tone:
+            event.status === "failed"
+              ? "bad"
+              : event.status === "completed"
+                ? "good"
+                : "warn",
+        }));
 
   const runItems: SummaryListItem[] = runs.slice(0, 5).map((run) => ({
     title: run.title || String(run.identifier || "Untitled run"),
@@ -770,7 +894,11 @@ export function App() {
               <div className="chat-feed">
                 {chatTurns.length ? (
                   chatTurns.map((turn) => (
-                    <ChatTurnCard key={`${turn.id}-${turnMode(turn)}`} turn={turn} />
+                    <ChatTurnCard
+                      key={`${turn.id}-${turnMode(turn)}`}
+                      turn={turn}
+                      backendUrl={backendUrl}
+                    />
                   ))
                 ) : (
                   <EmptyState message="Ask BOSS to build, fix, review, or summarize something." />
@@ -788,6 +916,13 @@ export function App() {
               />
 
               <div className="internal-grid">
+                <SummaryListCard
+                  eyebrow="Internal"
+                  title="Agent activity"
+                  items={agentActivityItems}
+                  empty="No active internal work right now."
+                />
+
                 <SummaryListCard
                   eyebrow="Runs"
                   title="Recent runs"
@@ -914,11 +1049,11 @@ export function App() {
             />
           ) : null}
 
-          {recentActivityItems.length ? (
+          {recentWorkItems.length ? (
             <SummaryListCard
               eyebrow="Recent"
-              title="What BOSS has been doing"
-              items={recentActivityItems}
+              title="Recent outcomes"
+              items={recentWorkItems}
               empty="No active work right now."
             />
           ) : null}
@@ -1005,10 +1140,11 @@ function ListRow(props: {
   );
 }
 
-function ChatTurnCard(props: { turn: ChatTurn }) {
+function ChatTurnCard(props: { turn: ChatTurn; backendUrl: string }) {
   const mode = turnMode(props.turn);
   const pending = "pending" in props.turn && props.turn.pending;
   const statusText = pending ? "Working" : formatStatus(mode);
+  const result = turnResult(props.turn);
 
   return (
     <article className="chat-turn">
@@ -1023,8 +1159,127 @@ function ChatTurnCard(props: { turn: ChatTurn }) {
           <span className="bubble-status">{statusText}</span>
         </div>
         <p>{props.turn.response || (pending ? "Thinking..." : "No response text.")}</p>
+        {hasBuildRunDetails(result) ? (
+          <InternalRunCard backendUrl={props.backendUrl} result={result} />
+        ) : null}
       </div>
     </article>
+  );
+}
+
+function InternalRunCard(props: {
+  backendUrl: string;
+  result: ChatResultPayload & {
+    task_id: number;
+    run_kind: string;
+    internal_summary: InternalRunSummary;
+  };
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [details, setDetails] = useState<RunDetailsResponse | null>(null);
+  const [error, setError] = useState("");
+  const summary = props.result.internal_summary;
+
+  async function toggleExpanded() {
+    const nextExpanded = !expanded;
+    setExpanded(nextExpanded);
+    if (!nextExpanded || details || loading) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await fetchRunDetails(props.backendUrl, props.result.task_id, props.result.run_kind);
+      setDetails(payload);
+    } catch (fetchError) {
+      setError(String(fetchError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const task = details?.task;
+  const planSteps = Array.isArray(task?.plan?.steps) ? task?.plan?.steps : [];
+  const steps = Array.isArray(task?.steps) ? task.steps : [];
+
+  return (
+    <section className="run-summary-card">
+      <div className="run-summary-head">
+        <div>
+          <span className="bubble-status">Internal run</span>
+          <strong>{summary.goal || "Build run"}</strong>
+        </div>
+        <button type="button" className="detail-toggle" onClick={() => void toggleExpanded()}>
+          {expanded ? "Hide details" : "Show details"}
+        </button>
+      </div>
+
+      <p className="run-summary-copy">{buildRunSummaryCopy(summary)}</p>
+
+      <div className="run-summary-facts">
+        <span>{formatStatus(summary.status)}</span>
+        <span>{summary.total_steps || 0} steps</span>
+        <span>{formatFileSummary(summary.changed_files, 2)}</span>
+      </div>
+
+      {expanded ? (
+        <div className="run-detail-shell">
+          {loading ? <p className="run-detail-note">Loading internal run details…</p> : null}
+          {error ? <p className="run-detail-note tone-bad">{error}</p> : null}
+
+          {!loading && !error && planSteps.length ? (
+            <div className="run-detail-block">
+              <span className="run-detail-label">Architect plan</span>
+              <ol className="run-plan-list">
+                {planSteps.map((step, index) => (
+                  <li key={`${index}-${step}`}>{step}</li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+
+          {!loading && !error && steps.length ? (
+            <div className="run-detail-block">
+              <span className="run-detail-label">Child runs</span>
+              <div className="run-step-list">
+                {steps.map((step) => (
+                  <article
+                    key={`${step.step_index ?? "step"}-${step.title || "untitled"}`}
+                    className={`run-step-card tone-${runTone(step.status)}`}
+                  >
+                    <div className="run-step-head">
+                      <strong>{step.title || "Untitled step"}</strong>
+                      <span>{formatStatus(step.status)}</span>
+                    </div>
+
+                    <div className="run-step-meta">
+                      <span>Engineer</span>
+                      <span>Attempt {step.iterations || 0}</span>
+                      <span>{formatFileSummary(step.files_changed, 2)}</span>
+                    </div>
+
+                    <p className="run-step-copy">{testOutputSummary(step)}</p>
+
+                    {trimText(step.audit_output) ? (
+                      <p className="run-step-copy">Auditor: {trimText(step.audit_output)}</p>
+                    ) : null}
+
+                    {step.errors?.length ? (
+                      <p className="run-step-copy">Errors: {trimText(step.errors.join(" "))}</p>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {!loading && !error && !planSteps.length && !steps.length ? (
+            <p className="run-detail-note">No additional internal detail was recorded for this run.</p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

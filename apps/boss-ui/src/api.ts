@@ -1,5 +1,6 @@
 import type {
   ChatRequest,
+  RunDetailsResponse,
   CommandCenterSnapshot,
   NextSnapshot,
   ProjectsResponse,
@@ -101,6 +102,17 @@ export async function loadCommandCenter(baseUrl: string): Promise<CommandCenterS
     history,
     roots,
   };
+}
+
+export function fetchRunDetails(
+  baseUrl: string,
+  identifier: string | number,
+  kind = "build",
+): Promise<RunDetailsResponse> {
+  return request<RunDetailsResponse>(
+    baseUrl,
+    `/runs/${encodeURIComponent(String(identifier))}?kind=${encodeURIComponent(kind)}`,
+  );
 }
 
 export async function streamChat(

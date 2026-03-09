@@ -519,6 +519,111 @@ textarea {
   letter-spacing: 0.14em;
 }
 
+.run-summary-card {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(247, 239, 227, 0.72);
+}
+
+.run-summary-head,
+.run-step-head,
+.run-step-meta,
+.run-summary-facts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.run-summary-head strong,
+.run-step-head strong {
+  display: block;
+  font-size: 0.98rem;
+}
+
+.detail-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.66);
+  color: var(--text);
+}
+
+.run-summary-copy,
+.run-step-copy,
+.run-detail-note,
+.run-plan-list {
+  margin: 12px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.run-summary-facts,
+.run-step-meta {
+  margin-top: 12px;
+}
+
+.run-summary-facts span,
+.run-step-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.run-detail-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.run-detail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.run-detail-label {
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+}
+
+.run-plan-list {
+  padding-left: 18px;
+}
+
+.run-step-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.run-step-card {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
 .info-card {
   padding: 18px;
 }

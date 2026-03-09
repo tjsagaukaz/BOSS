@@ -156,6 +156,77 @@ export interface RunsSnapshot {
   runs: RunSummary[];
 }
 
+export interface InternalRunSummary {
+  goal?: string;
+  status?: string;
+  planned_steps?: number;
+  completed_steps?: number;
+  total_steps?: number;
+  failed_steps?: number;
+  retries?: number;
+  changed_files?: string[];
+  changed_files_count?: number;
+  shipping_status?: string;
+  details_available?: boolean;
+  roles?: string[];
+}
+
+export interface ChatResultPayload {
+  status?: string;
+  task_id?: number;
+  final_result?: string;
+  changed_files?: string[];
+  run_kind?: string;
+  artifact_path?: string;
+  shipping?: Record<string, unknown>;
+  internal_summary?: InternalRunSummary;
+}
+
+export interface BuildTaskStep {
+  task_id?: number;
+  step_index?: number;
+  title?: string;
+  status?: string;
+  engineer_output?: string;
+  test_output?: Record<string, unknown>;
+  audit_output?: string;
+  files_changed?: string[];
+  errors?: string[];
+  commit_message?: string;
+  iterations?: number;
+  runtime_seconds?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface BuildTaskRecord {
+  id?: number;
+  project_name?: string;
+  task?: string;
+  plan?: {
+    goal?: string;
+    steps?: string[];
+  };
+  status?: string;
+  total_steps?: number;
+  files_changed?: string[];
+  errors?: string[];
+  final_result?: string;
+  runtime_seconds?: number;
+  metadata?: Record<string, unknown>;
+  steps?: BuildTaskStep[];
+}
+
+export interface RunDetailsResponse {
+  kind?: string;
+  identifier?: string | number;
+  project_name?: string;
+  status?: string;
+  summary?: Record<string, unknown>;
+  task?: BuildTaskRecord;
+  analysis?: Record<string, unknown>;
+  artifact_path?: string;
+}
+
 export interface RootSnapshot {
   primary_root: string;
   search_roots: string[];
@@ -184,6 +255,7 @@ export interface StreamingTurn {
   metadata: {
     mode: string;
     actions: unknown[];
+    result?: ChatResultPayload | null;
     stream_id?: string;
   };
   pending: boolean;
@@ -203,7 +275,7 @@ export interface StreamDoneResponse {
   intent?: string;
   mode?: string;
   actions?: unknown[];
-  result?: unknown;
+  result?: ChatResultPayload | null;
 }
 
 export type StreamEvent =

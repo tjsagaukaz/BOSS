@@ -1160,38 +1160,42 @@ class ConversationRouter:
         )
 
     def _format_build_result(self, result) -> str:
-        changed = ", ".join(result.changed_files) or "none"
-        completed_steps = sum(1 for step in getattr(result, "step_results", []) if getattr(step, "status", "") == "completed")
-        total_steps = len(getattr(result, "step_results", []) or [])
-        plan = getattr(result, "plan", None)
-        if total_steps == 0 and plan is not None:
-            total_steps = len(getattr(plan, "steps", []) or [])
-        next_step = next(
-            (
-                getattr(step, "step_title", "")
-                for step in getattr(result, "step_results", [])
-                if getattr(step, "status", "") not in {"completed"}
-            ),
-            "",
-        )
-        lines = [
-            "Build status.",
-            "",
-            f"Goal: {getattr(result, 'goal', '') or 'Build task'}",
-            f"Status: {result.status}",
-            f"Progress: {completed_steps}/{total_steps} step(s) completed" if total_steps else "Progress: starting",
-            f"Run ID: {result.task_id}",
-            f"Changed files: {changed}",
-        ]
-        if next_step:
-            lines.append(f"Next step: {next_step}")
-        shipping = dict((getattr(result, "metadata", {}) or {}).get("shipping", {}) or {})
-        if shipping:
-            lines.append(f"Shipping: {shipping.get('status', 'ready')}")
-            if shipping.get("message"):
-                lines.append(f"Ship note: {shipping.get('message')}")
-        lines.extend(["", str(result.final_result)])
-        return "\n".join(lines)
+        summary = self._build_run_summary(result)
+        goal = str(summary.get("goal", "")).strip() or "the requested build"
+        status = str(summary.get("status", "")).strip().lower()
+        completed_steps = int(summary.get("completed_steps", 0) or 0)
+        total_steps = int(summary.get("total_steps", 0) or 0)
+        failed_steps = int(summary.get("failed_steps", 0) or 0)
+        changed_files = list(summary.get("changed_files", []) or [])
+        shipping_status = str(summary.get("shipping_status", "")).strip()
+
+        if status == "completed":
+            lead = f"Finished {goal}."
+        elif status in {"failed", "stopped", "aborted"}:
+            lead = f"Stopped {goal} with follow-up needed."
+        else:
+            lead = f"Build status for {goal}: {status or 'running'}."
+
+        details: list[str] = []
+        if total_steps:
+            details.append(f"{completed_steps}/{total_steps} steps completed")
+        if failed_steps:
+            details.append(f"{failed_steps} step(s) need follow-up")
+        if changed_files:
+            if len(changed_files) <= 3:
+                details.append(f"Changed {', '.join(changed_files)}")
+            else:
+                details.append(f"Changed {len(changed_files)} files")
+        if shipping_status:
+            details.append(f"Shipping: {shipping_status.replace('_', ' ')}")
+
+        final_result = self._one_line(getattr(result, "final_result", ""))
+        if final_result and final_result.lower() not in lead.lower():
+            details.append(final_result)
+
+        if not details:
+            return lead
+        return f"{lead} {' '.join(details)}"
 
     def _format_task_status(self, task: dict[str, Any] | None) -> str:
         if not task:
@@ -1253,11 +1257,16 @@ class ConversationRouter:
                 "audit_passed": result.audit.passed,
             }
         if hasattr(result, "status") and hasattr(result, "final_result") and hasattr(result, "task_id"):
+            summary = self._build_run_summary(result)
             return {
                 "status": result.status,
                 "task_id": result.task_id,
                 "final_result": result.final_result,
                 "changed_files": getattr(result, "changed_files", []),
+                "run_kind": "build",
+                "artifact_path": str((getattr(result, "metadata", {}) or {}).get("artifact_path", "") or ""),
+                "shipping": dict((getattr(result, "metadata", {}) or {}).get("shipping", {}) or {}),
+                "internal_summary": summary,
             }
         if isinstance(result, list):
             serialized = []
@@ -1276,6 +1285,42 @@ class ConversationRouter:
         if isinstance(result, dict):
             return result
         return json.loads(json.dumps(result, default=str))
+
+    def _build_run_summary(self, result: Any) -> dict[str, Any]:
+        step_results = list(getattr(result, "step_results", []) or [])
+        plan = getattr(result, "plan", None)
+        plan_steps = list(getattr(plan, "steps", []) or [])
+        total_steps = len(step_results) or len(plan_steps)
+        completed_steps = sum(1 for step in step_results if str(getattr(step, "status", "")).lower() == "completed")
+        failed_steps = sum(
+            1
+            for step in step_results
+            if str(getattr(step, "status", "")).lower() in {"failed", "stopped", "aborted"}
+        )
+        retries = sum(max(int(getattr(step, "iterations", 0) or 0) - 1, 0) for step in step_results)
+        changed_files = list(getattr(result, "changed_files", []) or [])
+        metadata = dict(getattr(result, "metadata", {}) or {})
+        shipping = dict(metadata.get("shipping", {}) or {})
+        return {
+            "goal": str(getattr(result, "goal", "") or "Build task"),
+            "status": str(getattr(result, "status", "") or "unknown"),
+            "planned_steps": len(plan_steps),
+            "completed_steps": completed_steps,
+            "total_steps": total_steps,
+            "failed_steps": failed_steps,
+            "retries": retries,
+            "changed_files": changed_files,
+            "changed_files_count": len(changed_files),
+            "shipping_status": str(shipping.get("status", "") or ""),
+            "details_available": bool(getattr(result, "task_id", None)),
+            "roles": ["architect", "engineer", "test", "auditor"],
+        }
+
+    def _one_line(self, value: Any, limit: int = 220) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 1].rstrip()}…"
 
     def _field(self, value: Any, key: str, default: Any) -> Any:
         if value is None:
