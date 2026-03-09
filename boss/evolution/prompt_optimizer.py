@@ -19,6 +19,13 @@ class PromptOptimizer:
         "security": "security_prompt.txt",
         "documentation": "documentation_prompt.txt",
     }
+    SOLUTION_GUIDANCE = {
+        "api endpoint": "Reuse existing request validation, response shaping, and error handling patterns.",
+        "authentication flow": "Preserve existing auth boundaries, token handling, and permission checks.",
+        "stripe integration": "Preserve existing billing, retries, and idempotency handling patterns.",
+        "test coverage update": "Keep tests tight to the changed behavior and reuse the existing test helpers.",
+        "webhook handler": "Preserve signature verification, retry safety, and idempotent processing.",
+    }
 
     def __init__(
         self,
@@ -174,10 +181,12 @@ class PromptOptimizer:
                 ]
             )
 
-        if frequent_solutions:
-            instructions.append(
-                "Reuse established solution patterns when they fit: " + ", ".join(frequent_solutions[:4]) + "."
-            )
+        solution_guidance = [
+            self.SOLUTION_GUIDANCE[item]
+            for item in frequent_solutions
+            if item in self.SOLUTION_GUIDANCE
+        ]
+        instructions.extend(solution_guidance[:2])
         if style is not None:
             style_notes = [style.indentation]
             if style.naming_conventions:

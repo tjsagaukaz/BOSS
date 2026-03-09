@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,13 @@ class BaseAgent:
 
     def _load_system_prompt(self) -> str:
         optimized_path = self.prompt_path.parent / "optimized" / self.prompt_path.name
-        source_path = optimized_path if optimized_path.exists() else self.prompt_path
+        use_optimized = os.environ.get("BOSS_USE_OPTIMIZED_PROMPTS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        source_path = optimized_path if use_optimized and optimized_path.exists() else self.prompt_path
         return source_path.read_text(encoding="utf-8").strip()
 
     def _build_prompt(

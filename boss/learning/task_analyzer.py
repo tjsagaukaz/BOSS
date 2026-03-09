@@ -191,12 +191,6 @@ class TaskAnalyzer:
             patterns["webhook handler"] += 1
         if "api" in lowered or "endpoint" in lowered:
             patterns["api endpoint"] += 1
-        for path in changed_files[:8]:
-            stem = Path(path).stem.replace("_", " ").replace("-", " ").strip()
-            if stem:
-                patterns[stem] += 1
-        if not patterns and task.strip():
-            patterns[task.strip()[:60]] += 1
         return [name for name, _count in patterns.most_common(8)]
 
     def _update_graph(

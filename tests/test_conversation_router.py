@@ -461,7 +461,7 @@ def test_conversation_router_short_circuits_small_talk(tmp_path):
 
     assert response["intent"] == "conversation"
     assert response["mode"] == "chat"
-    assert "hey" in response["reply"].lower()
+    assert response["reply"] == "Hey."
     assert orchestrator.project_brain_signals == []
 
 
@@ -493,6 +493,16 @@ def test_conversation_router_stream_small_talk_yields_short_reply(tmp_path):
     assert "hey" in deltas[0].lower()
     assert events[-1]["type"] == "done"
     assert orchestrator.project_brain_signals == []
+
+
+def test_persona_prompt_is_not_founder_roleplay(tmp_path):
+    history_store = ConversationHistoryStore(tmp_path / "boss.db")
+    router = ConversationRouter(_FakeOrchestrator(), history_store, _FakeRouter(), tmp_path)
+
+    persona_prompt = router._persona_system_prompt()
+
+    assert "co-ceo" not in persona_prompt.lower()
+    assert "plain language" in persona_prompt.lower()
 
 
 def test_conversation_router_can_cancel_stream(tmp_path):
