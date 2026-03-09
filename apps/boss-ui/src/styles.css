@@ -348,9 +348,6 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
 }
 
 .project-rail-item {
@@ -397,8 +394,138 @@ textarea {
   box-shadow: 0 0 24px rgba(84, 247, 255, 0.09);
 }
 
-.project-picker-compact {
+.rail-actions,
+.rail-section,
+.chat-thread-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.rail-actions {
+  gap: 10px;
+}
+
+.rail-action {
+  width: 100%;
+  justify-content: center;
+}
+
+.rail-section {
+  gap: 10px;
+}
+
+.rail-section-chats {
   margin-top: auto;
+}
+
+.rail-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rail-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--accent);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.rail-empty {
+  padding: 14px 4px 0;
+}
+
+.rail-empty p,
+.rail-empty span {
+  margin: 0;
+}
+
+.rail-empty p {
+  font-weight: 600;
+}
+
+.rail-empty span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.chat-thread-list {
+  gap: 10px;
+}
+
+.chat-thread-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px;
+  border-radius: 18px;
+  border: 1px solid transparent;
+}
+
+.chat-thread-item.active {
+  border-color: rgba(84, 247, 255, 0.24);
+  background: rgba(84, 247, 255, 0.04);
+}
+
+.chat-thread-button,
+.chat-thread-delete {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+}
+
+.chat-thread-button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  text-align: left;
+}
+
+.chat-thread-button strong,
+.chat-thread-button span {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-thread-button strong {
+  font-size: 0.92rem;
+}
+
+.chat-thread-button span {
+  color: var(--muted);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.chat-thread-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.chat-thread-delete:hover {
+  color: var(--bad);
+  background: rgba(255, 115, 132, 0.08);
 }
 
 .chat-shell {
@@ -1018,6 +1145,55 @@ textarea {
 
 .drawer-scroll {
   min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.overlay-shell {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+}
+
+.overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(2, 5, 9, 0.78);
+  backdrop-filter: blur(8px);
+}
+
+.overlay-card {
+  position: relative;
+  z-index: 1;
+  width: min(640px, calc(100vw - 40px));
+  padding: 22px;
+  border-radius: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.overlay-head,
+.overlay-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.overlay-field textarea {
+  border-radius: 18px;
+  min-height: 88px;
+}
+
+.overlay-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 260px;
   overflow: auto;
   padding-right: 4px;
 }

@@ -1,5 +1,6 @@
 import type {
   ChatRequest,
+  ChatThreadSummary,
   CommandCenterSnapshot,
   RunDetailsResponse,
   StreamEvent,
@@ -33,12 +34,55 @@ export function postJson<T>(baseUrl: string, path: string, body: unknown): Promi
   });
 }
 
-export async function setActiveProject(baseUrl: string, projectName: string): Promise<void> {
-  await postJson(baseUrl, "/projects/active", { project_name: projectName });
+export async function setActiveProject(
+  baseUrl: string,
+  projectName: string,
+): Promise<{
+  active_project: string | null;
+  project?: { name?: string; root?: string; summary?: string };
+}> {
+  return postJson(baseUrl, "/projects/active", { project_name: projectName });
 }
 
-export async function loadCommandCenter(baseUrl: string): Promise<CommandCenterSnapshot> {
-  return request<CommandCenterSnapshot>(baseUrl, "/command-center");
+export async function createProject(
+  baseUrl: string,
+  payload: { path?: string; project_name?: string; switch_to?: boolean },
+): Promise<Record<string, unknown>> {
+  return postJson<Record<string, unknown>>(baseUrl, "/projects/create", payload);
+}
+
+export async function loadCommandCenter(
+  baseUrl: string,
+  options?: { threadId?: string | null },
+): Promise<CommandCenterSnapshot> {
+  const suffix = options?.threadId ? `?thread_id=${encodeURIComponent(options.threadId)}` : "";
+  return request<CommandCenterSnapshot>(baseUrl, `/command-center${suffix}`);
+}
+
+export async function createChatThread(
+  baseUrl: string,
+  payload: { project_name?: string; title?: string },
+): Promise<ChatThreadSummary> {
+  return postJson<ChatThreadSummary>(baseUrl, "/chat/threads", payload);
+}
+
+export async function deleteChatThread(
+  baseUrl: string,
+  threadId: string,
+  projectName?: string,
+): Promise<void> {
+  const target = endpoint(
+    baseUrl,
+    `/chat/threads/${encodeURIComponent(threadId)}${projectName ? `?project_name=${encodeURIComponent(projectName)}` : ""}`,
+  );
+  const response = await fetch(target, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `Request failed: ${response.status}`);
+  }
 }
 
 export function fetchRunDetails(

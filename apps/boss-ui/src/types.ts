@@ -264,6 +264,7 @@ export interface RootSnapshot {
 
 export interface ChatHistoryTurn {
   id: string | number;
+  thread_id?: string | null;
   message: string;
   response: string;
   intent?: string;
@@ -271,7 +272,21 @@ export interface ChatHistoryTurn {
   created_at?: string;
 }
 
+export interface ChatThreadSummary {
+  id: string;
+  project_name?: string | null;
+  title: string;
+  preview?: string;
+  last_message?: string;
+  turn_count?: number;
+  created_at?: string;
+  updated_at?: string;
+  legacy?: boolean;
+}
+
 export interface ChatHistorySnapshot {
+  active_thread_id?: string | null;
+  threads?: ChatThreadSummary[];
   history: ChatHistoryTurn[];
 }
 
@@ -295,10 +310,12 @@ export interface ChatRequest {
   execute: boolean;
   auto_approve: boolean;
   project_name?: string;
+  thread_id?: string;
 }
 
 export interface StreamDoneResponse {
   id?: string | number;
+  thread_id?: string;
   reply?: string;
   intent?: string;
   mode?: string;
@@ -310,6 +327,7 @@ export type StreamEvent =
   | {
       type: "meta";
       stream_id?: string;
+      thread_id?: string;
       intent?: string;
       mode?: string;
       actions?: unknown[];

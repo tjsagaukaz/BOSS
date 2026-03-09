@@ -86,6 +86,18 @@ def create_routes(orchestrator, swarm_manager) -> APIRouter:
             ),
         }
 
+    @router.post("/projects/create")
+    def create_project(body: dict[str, Any]) -> dict[str, Any]:
+        path = body.get("path")
+        project_name = body.get("project_name")
+        return _serialize(
+            orchestrator.create_workspace_folder(
+                path=str(path) if path else None,
+                switch_to=bool(body.get("switch_to", True)),
+                project_name=str(project_name) if project_name else None,
+            )
+        )
+
     @router.get("/workspace")
     def workspace(project_name: Optional[str] = None) -> dict[str, Any]:
         return _serialize(orchestrator.workspace_snapshot(project_name=project_name))
@@ -170,16 +182,48 @@ def create_routes(orchestrator, swarm_manager) -> APIRouter:
         return {"risks": _serialize(orchestrator.project_risks(project_name=project_name, limit=limit))}
 
     @router.get("/chat/history")
-    def chat_history(project_name: Optional[str] = None, limit: int = 40) -> dict[str, Any]:
+    def chat_history(
+        project_name: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        limit: int = 40,
+    ) -> dict[str, Any]:
+        active_thread = thread_id or (
+            (orchestrator.latest_conversation_thread(project_name=project_name) or {}).get("id")
+        )
         return {
+            "active_thread_id": active_thread,
+            "threads": _serialize(orchestrator.conversation_threads_snapshot(project_name=project_name, limit=12)),
             "history": _serialize(
-                orchestrator.conversation_history_snapshot(project_name=project_name, limit=limit)
+                orchestrator.conversation_history_snapshot(
+                    project_name=project_name,
+                    limit=limit,
+                    thread_id=thread_id,
+                )
             )
         }
+
+    @router.post("/chat/threads")
+    def create_chat_thread(body: dict[str, Any]) -> dict[str, Any]:
+        project_name = body.get("project_name")
+        title = str(body.get("title", "New chat")).strip() or "New chat"
+        return _serialize(
+            orchestrator.create_conversation_thread(
+                project_name=str(project_name) if project_name else None,
+                title=title,
+            )
+        )
+
+    @router.delete("/chat/threads/{thread_id}")
+    def delete_chat_thread(thread_id: str, project_name: Optional[str] = None) -> dict[str, Any]:
+        deleted = orchestrator.delete_conversation_thread(thread_id, project_name=project_name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Chat thread not found.")
+        return {"deleted": True, "thread_id": thread_id}
 
     @router.get("/command-center")
     def command_center(
         project_name: Optional[str] = None,
+        thread_id: Optional[str] = None,
         include_internal: bool = False,
         limit: int = 40,
     ) -> dict[str, Any]:
@@ -210,8 +254,15 @@ def create_routes(orchestrator, swarm_manager) -> APIRouter:
             "permissions": _serialize(orchestrator.permissions_snapshot()),
             "runs": {"runs": _serialize(orchestrator.recent_runs(project_name=project_name, limit=20))},
             "history": {
+                "active_thread_id": thread_id
+                or ((orchestrator.latest_conversation_thread(project_name=project_name) or {}).get("id")),
+                "threads": _serialize(orchestrator.conversation_threads_snapshot(project_name=project_name, limit=12)),
                 "history": _serialize(
-                    orchestrator.conversation_history_snapshot(project_name=project_name, limit=limit)
+                    orchestrator.conversation_history_snapshot(
+                        project_name=project_name,
+                        limit=limit,
+                        thread_id=thread_id,
+                    )
                 )
             },
             "roots": _serialize(roots),
@@ -226,10 +277,12 @@ def create_routes(orchestrator, swarm_manager) -> APIRouter:
         execute = bool(body.get("execute", False))
         auto_approve = bool(body.get("auto_approve", False))
         intent_override = body.get("intent")
+        thread_id = body.get("thread_id")
         return _serialize(
             orchestrator.chat(
                 message,
                 project_name=project_name,
+                thread_id=str(thread_id) if thread_id else None,
                 execute=execute,
                 auto_approve=auto_approve,
                 intent_override=str(intent_override) if intent_override else None,
@@ -262,12 +315,14 @@ def create_routes(orchestrator, swarm_manager) -> APIRouter:
         execute = bool(body.get("execute", False))
         auto_approve = bool(body.get("auto_approve", False))
         intent_override = body.get("intent")
+        thread_id = body.get("thread_id")
 
         def stream_events():
             try:
                 for event in orchestrator.chat_stream(
                     message,
                     project_name=project_name,
+                    thread_id=str(thread_id) if thread_id else None,
                     execute=execute,
                     auto_approve=auto_approve,
                     intent_override=str(intent_override) if intent_override else None,

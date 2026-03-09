@@ -157,6 +157,7 @@ class ConversationRouter:
         message: str,
         *,
         project_name: str | None = None,
+        thread_id: str | None = None,
         execute: bool = False,
         auto_approve: bool = False,
         intent_override: str | None = None,
@@ -172,7 +173,7 @@ class ConversationRouter:
         detected = self._detect_intent(cleaned, intent_override=intent_override, project_name_hint=active_project)
         if active_project and not is_small_talk:
             self.orchestrator.note_project_brain_signal(cleaned, project_name=active_project)
-        history = self.history_store.recent(project_name=active_project, limit=8)
+        history = self.history_store.recent(project_name=active_project, limit=8, thread_id=thread_id)
         implicit_execute = bool(detected.get("explicit_command"))
         should_execute = execute or implicit_execute or self._should_auto_execute(detected, cleaned, auto_approve=auto_approve)
         direct_request = self._looks_direct_request(cleaned.lower())
@@ -183,11 +184,12 @@ class ConversationRouter:
                 "conversation_type": "execution",
                 "mode": "blocked",
                 "project_name": active_project,
+                "thread_id": thread_id,
                 "reply": self._blocked_execution_reply(detected),
                 "actions": [],
                 "result": None,
             }
-            self._record_history(active_project, cleaned, response)
+            self._record_history(active_project, cleaned, response, thread_id=thread_id)
             return response
 
         if detected["intent"] in self.MUTATING_INTENTS and not should_execute:
@@ -196,11 +198,12 @@ class ConversationRouter:
                 "conversation_type": "execution",
                 "mode": "suggested",
                 "project_name": active_project,
+                "thread_id": thread_id,
                 "reply": self._suggest_execution_reply(detected, active_project),
                 "actions": [],
                 "result": None,
             }
-            self._record_history(active_project, cleaned, response)
+            self._record_history(active_project, cleaned, response, thread_id=thread_id)
             return response
 
         if detected["intent"] == "task_suggestion":
@@ -210,7 +213,8 @@ class ConversationRouter:
                     project_name=active_project,
                     auto_approve=auto_approve,
                 )
-                self._record_history(active_project, cleaned, response)
+                response["thread_id"] = thread_id
+                self._record_history(active_project, cleaned, response, thread_id=thread_id)
                 return response
             if direct_request:
                 response = {
@@ -218,17 +222,19 @@ class ConversationRouter:
                     "conversation_type": "execution",
                     "mode": "blocked",
                     "project_name": active_project,
+                    "thread_id": thread_id,
                     "reply": self._blocked_execution_reply({"intent": "build", "task": str(detected.get("task", ""))}),
                     "actions": [],
                     "result": None,
                 }
-                self._record_history(active_project, cleaned, response)
+                self._record_history(active_project, cleaned, response, thread_id=thread_id)
                 return response
             response = {
                 "intent": "conversation",
                 "conversation_type": "discussion",
                 "mode": "chat",
                 "project_name": active_project,
+                "thread_id": thread_id,
                 "reply": self._conversation_reply(
                     message=cleaned,
                     project_name=active_project,
@@ -239,7 +245,7 @@ class ConversationRouter:
                 "actions": [],
                 "result": None,
             }
-            self._record_history(active_project, cleaned, response)
+            self._record_history(active_project, cleaned, response, thread_id=thread_id)
             return response
 
         if detected["intent"] == "conversation":
@@ -248,6 +254,7 @@ class ConversationRouter:
                 "conversation_type": "discussion",
                 "mode": "chat",
                 "project_name": active_project,
+                "thread_id": thread_id,
                 "reply": self._conversation_reply(
                     message=cleaned,
                     project_name=active_project,
@@ -257,12 +264,13 @@ class ConversationRouter:
                 "actions": [],
                 "result": None,
             }
-            self._record_history(active_project, cleaned, response)
+            self._record_history(active_project, cleaned, response, thread_id=thread_id)
             return response
 
         response = self._execute_intent(detected, project_name=active_project, auto_approve=auto_approve)
         response["conversation_type"] = self._conversation_type_for_intent(response["intent"])
-        self._record_history(active_project, cleaned, response)
+        response["thread_id"] = thread_id
+        self._record_history(active_project, cleaned, response, thread_id=thread_id)
         return response
 
     def stream_message(
@@ -270,6 +278,7 @@ class ConversationRouter:
         message: str,
         *,
         project_name: str | None = None,
+        thread_id: str | None = None,
         execute: bool = False,
         auto_approve: bool = False,
         intent_override: str | None = None,
@@ -291,6 +300,7 @@ class ConversationRouter:
             response = self.handle_message(
                 cleaned,
                 project_name=active_project,
+                thread_id=thread_id,
                 execute=should_execute,
                 auto_approve=auto_approve,
                 intent_override=intent_override,
@@ -306,6 +316,7 @@ class ConversationRouter:
             response = self.handle_message(
                 cleaned,
                 project_name=active_project,
+                thread_id=thread_id,
                 execute=should_execute,
                 auto_approve=auto_approve,
                 intent_override=intent_override,
@@ -317,7 +328,7 @@ class ConversationRouter:
             yield {"type": "done", "response": response}
             return
 
-        history = self.history_store.recent(project_name=active_project, limit=8)
+        history = self.history_store.recent(project_name=active_project, limit=8, thread_id=thread_id)
         actions: list[dict[str, Any]] = []
         mode = "chat"
         intent = "conversation"
@@ -332,6 +343,7 @@ class ConversationRouter:
             "conversation_type": conversation_type,
             "mode": mode,
             "project_name": active_project,
+            "thread_id": thread_id,
             "actions": actions,
         }
 
@@ -366,11 +378,12 @@ class ConversationRouter:
                     "conversation_type": conversation_type,
                     "mode": mode,
                     "project_name": active_project,
+                    "thread_id": thread_id,
                     "reply": reply,
                     "actions": actions,
                     "result": None,
                 }
-                self._record_history(active_project, cleaned, response)
+                self._record_history(active_project, cleaned, response, thread_id=thread_id)
                 events.put({"type": "done", "response": response})
             except ConversationInterrupted:
                 response = {
@@ -378,11 +391,12 @@ class ConversationRouter:
                     "conversation_type": conversation_type,
                     "mode": "interrupted",
                     "project_name": active_project,
+                    "thread_id": thread_id,
                     "reply": "".join(chunks).strip() or "Stopped. Ready for the next move.",
                     "actions": actions,
                     "result": None,
                 }
-                self._record_history(active_project, cleaned, response)
+                self._record_history(active_project, cleaned, response, thread_id=thread_id)
                 events.put({"type": "interrupted", "stream_id": stream_id})
                 events.put({"type": "done", "response": response})
             except Exception as exc:
@@ -395,6 +409,7 @@ class ConversationRouter:
                             "conversation_type": conversation_type,
                             "mode": "blocked",
                             "project_name": active_project,
+                            "thread_id": thread_id,
                             "reply": str(exc),
                             "actions": [],
                             "result": None,
@@ -427,8 +442,13 @@ class ConversationRouter:
                     return True
         return False
 
-    def history(self, project_name: str | None = None, limit: int = 40) -> list[dict[str, Any]]:
-        return self.history_store.recent(project_name=project_name, limit=limit)
+    def history(
+        self,
+        project_name: str | None = None,
+        limit: int = 40,
+        thread_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.history_store.recent(project_name=project_name, limit=limit, thread_id=thread_id)
 
     def _execute_intent(
         self,
@@ -693,10 +713,18 @@ class ConversationRouter:
                 pass
         return self.orchestrator.workspace_context()
 
-    def _record_history(self, project_name: str | None, message: str, response: dict[str, Any]) -> None:
-        recent_history = self.history_store.recent(project_name=project_name, limit=6)
+    def _record_history(
+        self,
+        project_name: str | None,
+        message: str,
+        response: dict[str, Any],
+        *,
+        thread_id: str | None = None,
+    ) -> None:
+        recent_history = self.history_store.recent(project_name=project_name, limit=6, thread_id=thread_id)
         self.history_store.append_turn(
             project_name=project_name,
+            thread_id=thread_id,
             message=message,
             response=str(response.get("reply", "")),
             intent=str(response.get("intent", "conversation")),
@@ -716,6 +744,7 @@ class ConversationRouter:
             "conversation_type": response.get("conversation_type", self._conversation_type_for_intent(str(response.get("intent", "conversation")))),
             "mode": response.get("mode"),
             "project_name": response.get("project_name"),
+            "thread_id": response.get("thread_id"),
             "actions": response.get("actions", []),
         }
 

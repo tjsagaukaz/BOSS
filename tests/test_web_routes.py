@@ -12,11 +12,22 @@ class _FakeOrchestrator:
         self.active_project = "legion"
         self.workspace_root = "/Users/tj"
         self.commit_status = "pending"
+        self.active_thread_id = "thread_1"
+        self.threads = [
+            {
+                "id": "thread_1",
+                "project_name": "legion",
+                "title": "Architecture chat",
+                "updated_at": "now",
+                "turn_count": 1,
+            }
+        ]
 
     def chat(
         self,
         message: str,
         project_name: str | None = None,
+        thread_id: str | None = None,
         execute: bool = False,
         auto_approve: bool = False,
         intent_override: str | None = None,
@@ -25,6 +36,7 @@ class _FakeOrchestrator:
             {
                 "message": message,
                 "project_name": project_name,
+                "thread_id": thread_id,
                 "execute": execute,
                 "auto_approve": auto_approve,
                 "intent_override": intent_override,
@@ -35,6 +47,7 @@ class _FakeOrchestrator:
             "intent": "conversation",
             "mode": "chat",
             "project_name": "legion",
+            "thread_id": thread_id or self.active_thread_id,
             "actions": [],
             "result": None,
         }
@@ -43,6 +56,7 @@ class _FakeOrchestrator:
         self,
         message: str,
         project_name: str | None = None,
+        thread_id: str | None = None,
         execute: bool = False,
         auto_approve: bool = False,
         intent_override: str | None = None,
@@ -51,13 +65,21 @@ class _FakeOrchestrator:
             {
                 "message": message,
                 "project_name": project_name,
+                "thread_id": thread_id,
                 "execute": execute,
                 "auto_approve": auto_approve,
                 "intent_override": intent_override,
                 "stream": True,
             }
         )
-        yield {"type": "meta", "intent": "conversation", "mode": "chat", "project_name": "legion", "actions": []}
+        yield {
+            "type": "meta",
+            "intent": "conversation",
+            "mode": "chat",
+            "project_name": "legion",
+            "thread_id": thread_id or self.active_thread_id,
+            "actions": [],
+        }
         yield {"type": "delta", "delta": "hello "}
         yield {
             "type": "done",
@@ -66,13 +88,52 @@ class _FakeOrchestrator:
                 "intent": "conversation",
                 "mode": "chat",
                 "project_name": "legion",
+                "thread_id": thread_id or self.active_thread_id,
                 "actions": [],
                 "result": None,
             },
         }
 
-    def conversation_history_snapshot(self, project_name: str | None = None, limit: int = 40):
-        return [{"id": 1, "message": "hello", "response": "ok", "intent": "conversation", "metadata": {}, "created_at": "now"}]
+    def conversation_history_snapshot(
+        self,
+        project_name: str | None = None,
+        limit: int = 40,
+        thread_id: str | None = None,
+    ):
+        return [
+            {
+                "id": 1,
+                "thread_id": thread_id or self.active_thread_id,
+                "message": "hello",
+                "response": "ok",
+                "intent": "conversation",
+                "metadata": {},
+                "created_at": "now",
+            }
+        ]
+
+    def conversation_threads_snapshot(self, project_name: str | None = None, limit: int = 12):
+        return self.threads[:limit]
+
+    def latest_conversation_thread(self, project_name: str | None = None):
+        return self.threads[0]
+
+    def create_conversation_thread(self, project_name: str | None = None, title: str = "New chat"):
+        thread = {
+            "id": f"thread_{len(self.threads) + 1}",
+            "project_name": project_name or self.active_project,
+            "title": title,
+            "updated_at": "now",
+            "turn_count": 0,
+        }
+        self.threads.insert(0, thread)
+        self.active_thread_id = str(thread["id"])
+        return thread
+
+    def delete_conversation_thread(self, thread_id: str, project_name: str | None = None):
+        before = len(self.threads)
+        self.threads = [thread for thread in self.threads if thread["id"] != thread_id]
+        return len(self.threads) != before
 
     def agent_activity_snapshot(self):
         return [{"agent": "engineer", "status": "running", "message": "Editing auth.py", "project_name": "legion", "updated_at": "now"}]
@@ -129,6 +190,19 @@ class _FakeOrchestrator:
             return type("Context", (), {"name": "__workspace__", "root": self.workspace_root, "summary": "Workspace mode"})()
         self.active_project = project_name
         return type("Context", (), {"name": project_name, "root": f"/tmp/{project_name}", "summary": f"{project_name} summary"})()
+
+    def create_workspace_folder(
+        self,
+        path: str | None = None,
+        *,
+        switch_to: bool = True,
+        project_name: str | None = None,
+    ):
+        return {
+            "path": path or "/Users/tj/new-project",
+            "project_name": project_name or "new-project",
+            "switched": switch_to,
+        }
 
     def health_snapshot(self, project_name: str | None = None):
         return {
@@ -377,8 +451,25 @@ def test_chat_history_route_returns_history():
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["active_thread_id"] == "thread_1"
+    assert payload["threads"][0]["title"] == "Architecture chat"
     assert len(payload["history"]) == 1
     assert payload["history"][0]["message"] == "hello"
+
+
+def test_chat_thread_routes_create_and_delete_threads():
+    app = FastAPI()
+    orchestrator = _FakeOrchestrator()
+    app.include_router(create_routes(orchestrator, _FakeSwarmManager()))
+    client = TestClient(app)
+
+    created = client.post("/chat/threads", json={"title": "Fresh chat"})
+    assert created.status_code == 200
+    assert created.json()["title"] == "Fresh chat"
+
+    deleted = client.delete(f"/chat/threads/{created.json()['id']}")
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] is True
 
 
 def test_chat_route_requires_message():
@@ -416,6 +507,18 @@ def test_projects_active_route_can_switch_to_workspace_mode():
     assert response.status_code == 200
     payload = response.json()
     assert payload["active_project"] is None
+
+
+def test_projects_create_route_creates_workspace_folder():
+    app = FastAPI()
+    orchestrator = _FakeOrchestrator()
+    app.include_router(create_routes(orchestrator, _FakeSwarmManager()))
+    client = TestClient(app)
+
+    response = client.post("/projects/create", json={"path": "new-app", "switch_to": True})
+
+    assert response.status_code == 200
+    assert response.json()["path"] == "new-app"
 
 
 def test_roots_route_returns_workspace_roots():
@@ -480,6 +583,8 @@ def test_command_center_route_returns_bundled_snapshot():
     assert payload["projects"]["active_project"] == "legion"
     assert payload["brain"]["brain"]["current_focus"] == "Reliability hardening"
     assert payload["workspace"]["recent_terminal_commands"][0]["command"] == "pytest"
+    assert payload["history"]["active_thread_id"] == "thread_1"
+    assert payload["history"]["threads"][0]["title"] == "Architecture chat"
     assert payload["history"]["history"][0]["message"] == "hello"
 
 
@@ -494,6 +599,7 @@ def test_chat_stream_route_returns_ndjson_events():
         lines = [line for line in response.iter_lines() if line]
 
     assert '"type": "meta"' in lines[0]
+    assert '"thread_id": "thread_1"' in lines[0]
     assert '"type": "delta"' in lines[1]
     assert '"type": "done"' in lines[2]
     assert orchestrator.chat_calls[0]["stream"] is True

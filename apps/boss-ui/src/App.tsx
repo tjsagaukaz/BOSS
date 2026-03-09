@@ -1,12 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { startTransition, useEffect, useRef, useState } from "react";
 
-import { fetchRunDetails, loadCommandCenter, postJson, setActiveProject, streamChat } from "./api";
+import {
+  createChatThread,
+  createProject,
+  deleteChatThread,
+  fetchRunDetails,
+  loadCommandCenter,
+  postJson,
+  setActiveProject,
+  streamChat,
+} from "./api";
 import type {
   ActivityItem,
   BrainSnapshot,
   BuildTaskStep,
   ChatHistoryTurn,
+  ChatThreadSummary,
   ChatResultPayload,
   CommandCenterSnapshot,
   HealthSnapshot,
@@ -62,6 +72,13 @@ interface ProjectRailItem {
   meta: string;
 }
 
+interface ProjectShelfEntry {
+  key: string;
+  label: string;
+  meta: string;
+  root?: string;
+}
+
 const QUICK_PROMPTS = [
   "Fix the highest-priority issue in the active project.",
   "Audit the active project and tell me what matters.",
@@ -71,6 +88,7 @@ const QUICK_PROMPTS = [
 const IDLE_REFRESH_INTERVAL_MS = 5000;
 const LIVE_REFRESH_INTERVAL_MS = 1200;
 const INTERNAL_AGENTS = new Set(["architect", "engineer", "test", "auditor"]);
+const PROJECT_SHELF_STORAGE_KEY = "boss.desktop.project-shelf.v1";
 
 const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   active_project: "__workspace__",
@@ -529,43 +547,69 @@ function pendingCommitResult(turns: ChatTurn[]): (ChatResultPayload & { task_id:
   return result && typeof result.task_id === "number" ? (result as ChatResultPayload & { task_id: number }) : null;
 }
 
-function projectRailItems(
-  projects: ProjectCatalogItem[],
-  activeProject: string | null,
-  limit = 7,
-): ProjectRailItem[] {
-  const items: ProjectRailItem[] = [
-    {
-      key: null,
-      label: "Workspace",
-      meta: "All projects",
-    },
-  ];
-  const sorted = [...projects].sort((left, right) =>
-    (left.display_name || left.key).localeCompare(right.display_name || right.key),
-  );
-  const activeItem = sorted.find((project) => project.key === activeProject) ?? null;
-  if (activeItem) {
-    items.push({
-      key: activeItem.key,
-      label: activeItem.display_name || activeItem.key,
-      meta: activeItem.source_root || "project",
-    });
+function basename(path: string): string {
+  const cleaned = String(path || "").replace(/\/+$/, "");
+  if (!cleaned) return "Project";
+  const parts = cleaned.split("/");
+  return parts[parts.length - 1] || "Project";
+}
+
+function loadProjectShelf(): ProjectShelfEntry[] {
+  if (typeof window === "undefined") {
+    return [];
   }
-  for (const project of sorted) {
-    if (items.some((item) => item.key === project.key)) {
-      continue;
+  try {
+    const raw = window.localStorage.getItem(PROJECT_SHELF_STORAGE_KEY);
+    if (!raw) {
+      return [];
     }
-    items.push({
-      key: project.key,
-      label: project.display_name || project.key,
-      meta: project.source_root || "project",
-    });
-    if (items.length >= limit + 1) {
-      break;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
     }
+    return parsed
+      .map((item) => ({
+        key: String(item?.key || "").trim(),
+        label: String(item?.label || "").trim(),
+        meta: String(item?.meta || "").trim(),
+        root: item?.root ? String(item.root) : undefined,
+      }))
+      .filter((item) => item.key && item.label);
+  } catch (_error) {
+    return [];
   }
-  return items;
+}
+
+function persistProjectShelf(items: ProjectShelfEntry[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(PROJECT_SHELF_STORAGE_KEY, JSON.stringify(items.slice(0, 8)));
+}
+
+function upsertProjectShelf(
+  shelf: ProjectShelfEntry[],
+  entry: ProjectShelfEntry | null,
+): ProjectShelfEntry[] {
+  if (!entry?.key) {
+    return shelf;
+  }
+  const next = [entry, ...shelf.filter((item) => item.key !== entry.key)];
+  persistProjectShelf(next);
+  return next.slice(0, 8);
+}
+
+function displayProjectLabel(project: ProjectCatalogItem | null, fallbackKey: string | null): string {
+  if (project) {
+    return project.display_name || project.key;
+  }
+  if (!fallbackKey) {
+    return "Workspace";
+  }
+  if (fallbackKey.startsWith("path:")) {
+    return "Opened project";
+  }
+  return fallbackKey;
 }
 
 export function App() {
@@ -573,6 +617,7 @@ export function App() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus>("starting");
   const [backendMessage, setBackendMessage] = useState("Starting the BOSS backend...");
   const [projects, setProjects] = useState<ProjectCatalogItem[]>([]);
+  const [projectShelf, setProjectShelf] = useState<ProjectShelfEntry[]>(() => loadProjectShelf());
   const [activeProject, setActiveProjectState] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(EMPTY_WORKSPACE);
   const [brain, setBrain] = useState<BrainSnapshot>(EMPTY_BRAIN);
@@ -583,6 +628,8 @@ export function App() {
   const [permissions, setPermissions] = useState<PermissionSnapshot>(EMPTY_PERMISSIONS);
   const [roots, setRoots] = useState<RootSnapshot>(EMPTY_ROOTS);
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [chatThreads, setChatThreads] = useState<ChatThreadSummary[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatHistoryTurn[]>([]);
   const [composerValue, setComposerValue] = useState("");
   const [executeMode, setExecuteMode] = useState(true);
@@ -590,8 +637,11 @@ export function App() {
   const [surfaceError, setSurfaceError] = useState("");
   const [streamingTurn, setStreamingTurn] = useState<StreamingTurn | null>(null);
   const [sending, setSending] = useState(false);
-  const [showDetails, setShowDetails] = useState(false);
   const [actionBusyId, setActionBusyId] = useState("");
+  const [finderOpen, setFinderOpen] = useState(false);
+  const [finderValue, setFinderValue] = useState("");
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const [newProjectValue, setNewProjectValue] = useState("");
   const streamAbortRef = useRef<AbortController | null>(null);
   const activeStreamIdRef = useRef<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
@@ -648,13 +698,27 @@ export function App() {
     node.scrollTop = node.scrollHeight;
   }, [chatHistory.length, streamingTurn?.response, streamingTurn?.pending]);
 
-  async function refreshAll(url = backendUrl, background = false) {
+  useEffect(() => {
+    if (!activeProject) {
+      return;
+    }
+    const project = projects.find((item) => item.key === activeProject) ?? null;
+    const entry: ProjectShelfEntry = {
+      key: activeProject,
+      label: displayProjectLabel(project, activeProject),
+      meta: project?.source_root || (project?.root ? basename(project.root) : "recent"),
+      root: project?.root,
+    };
+    setProjectShelf((current) => upsertProjectShelf(current, entry));
+  }, [activeProject, projects]);
+
+  async function refreshAll(url = backendUrl, background = false, threadId = activeThreadId) {
     if (!url) return;
     if (!background) {
       setRefreshing(true);
     }
     try {
-      const snapshot = await loadCommandCenter(url);
+      const snapshot = await loadCommandCenter(url, { threadId });
       applySnapshot(snapshot);
       if (!background) {
         setSurfaceError("");
@@ -686,6 +750,8 @@ export function App() {
       setPermissions(snapshot.permissions);
       setRoots(snapshot.roots);
       setRuns(snapshot.runs.runs ?? []);
+      setChatThreads(snapshot.history.threads ?? []);
+      setActiveThreadId(snapshot.history.active_thread_id ?? null);
       setChatHistory(snapshot.history.history ?? []);
     });
     setBackendStatus("ready");
@@ -719,8 +785,138 @@ export function App() {
     setRefreshing(true);
     setSurfaceError("");
     try {
-      await setActiveProject(backendUrl, target);
-      await refreshAll(backendUrl);
+      const result = await setActiveProject(backendUrl, target);
+      const nextActive = result.active_project ?? null;
+      if (nextActive) {
+        const root = result.project?.root;
+        const entry: ProjectShelfEntry = {
+          key: nextActive,
+          label: root ? basename(root) : displayProjectLabel(null, nextActive),
+          meta: root ? "manual" : "recent",
+          root,
+        };
+        setProjectShelf((current) => upsertProjectShelf(current, entry));
+      }
+      setActiveThreadId(null);
+      await refreshAll(backendUrl, false, null);
+    } catch (error) {
+      setSurfaceError(String(error));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleCreateProject() {
+    if (!backendUrl) return;
+    const value = newProjectValue.trim();
+    if (!value) return;
+    setRefreshing(true);
+    setSurfaceError("");
+    try {
+      const result = await createProject(backendUrl, { path: value, switch_to: true });
+      const projectPath = String(result.path || value);
+      setNewProjectValue("");
+      setCreateProjectOpen(false);
+      const projectKey = typeof result.project_name === "string" && result.project_name ? result.project_name : null;
+      if (projectKey) {
+        setProjectShelf((current) =>
+          upsertProjectShelf(current, {
+            key: projectKey,
+            label: basename(projectPath),
+            meta: "created",
+            root: projectPath,
+          }),
+        );
+      }
+      setActiveThreadId(null);
+      await refreshAll(backendUrl, false, null);
+    } catch (error) {
+      setSurfaceError(String(error));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleFindProject() {
+    if (!backendUrl) return;
+    const value = finderValue.trim();
+    if (!value) return;
+    setRefreshing(true);
+    setSurfaceError("");
+    try {
+      const result = await setActiveProject(backendUrl, value);
+      const active = result.active_project ?? null;
+      if (active) {
+        setProjectShelf((current) =>
+          upsertProjectShelf(current, {
+            key: active,
+            label: basename(result.project?.root || value),
+            meta: "opened",
+            root: result.project?.root,
+          }),
+        );
+      }
+      setFinderValue("");
+      setFinderOpen(false);
+      setActiveThreadId(null);
+      await refreshAll(backendUrl, false, null);
+    } catch (error) {
+      setSurfaceError(String(error));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function handleNewChat() {
+    if (!backendUrl) return;
+    setActionBusyId("new-chat");
+    setSurfaceError("");
+    try {
+      const thread = await createChatThread(backendUrl, {
+        project_name: activeProject ?? undefined,
+        title: "New chat",
+      });
+      setActiveThreadId(thread.id);
+      setChatHistory([]);
+      await refreshAll(backendUrl, false, thread.id);
+    } catch (error) {
+      setSurfaceError(String(error));
+    } finally {
+      setActionBusyId("");
+    }
+  }
+
+  async function handleDeleteChat(threadId: string) {
+    if (!backendUrl) return;
+    setActionBusyId(`delete-chat-${threadId}`);
+    setSurfaceError("");
+    try {
+      await deleteChatThread(backendUrl, threadId, activeProject ?? undefined);
+      const nextThreadId = threadId === activeThreadId ? null : activeThreadId;
+      if (threadId === activeThreadId) {
+        const replacement = await createChatThread(backendUrl, {
+          project_name: activeProject ?? undefined,
+          title: "New chat",
+        });
+        setActiveThreadId(replacement.id);
+        await refreshAll(backendUrl, false, replacement.id);
+      } else {
+        await refreshAll(backendUrl, false, nextThreadId);
+      }
+    } catch (error) {
+      setSurfaceError(String(error));
+    } finally {
+      setActionBusyId("");
+    }
+  }
+
+  async function handleThreadSelect(threadId: string) {
+    if (!backendUrl || threadId === activeThreadId) return;
+    setRefreshing(true);
+    setSurfaceError("");
+    try {
+      setActiveThreadId(threadId);
+      await refreshAll(backendUrl, false, threadId);
     } catch (error) {
       setSurfaceError(String(error));
     } finally {
@@ -760,6 +956,7 @@ export function App() {
           execute: executeMode,
           auto_approve: executeMode,
           project_name: activeProject ?? undefined,
+          thread_id: activeThreadId ?? undefined,
         },
         (event) => applyStreamEvent(event, message),
         controller.signal,
@@ -792,6 +989,9 @@ export function App() {
     if (event.type === "meta") {
       if (event.stream_id) {
         activeStreamIdRef.current = event.stream_id;
+      }
+      if (event.thread_id) {
+        setActiveThreadId(event.thread_id);
       }
       setStreamingTurn((current) =>
         current
@@ -847,8 +1047,12 @@ export function App() {
     }
 
     if (event.type === "done" && event.response) {
+      if (event.response.thread_id) {
+        setActiveThreadId(event.response.thread_id);
+      }
       const turn: ChatHistoryTurn = {
         id: event.response.id || `${Date.now()}`,
+        thread_id: event.response.thread_id,
         message: originalMessage,
         response: event.response.reply || "",
         intent: event.response.intent || "conversation",
@@ -923,6 +1127,7 @@ export function App() {
   }
 
   const activeProjectMeta = projects.find((project) => project.key === activeProject) ?? null;
+  const activeThread = chatThreads.find((thread) => thread.id === activeThreadId) ?? chatThreads[0] ?? null;
   const chatTurns: ChatTurn[] = streamingTurn ? [...chatHistory, streamingTurn] : chatHistory;
   const blockedTurn =
     chatTurns.length && turnMode(chatTurns[chatTurns.length - 1]) === "blocked"
@@ -930,7 +1135,20 @@ export function App() {
       : null;
   const commitResult = pendingCommitResult(chatTurns);
   const liveStatus = currentLiveItem(activities, timeline, runs, streamingTurn);
-  const railProjects = projectRailItems(projects, activeProject, 8);
+  const finderQuery = finderValue.trim().toLowerCase();
+  const finderResults = projects
+    .filter((project) => {
+      if (!finderQuery) {
+        return true;
+      }
+      const haystack = [project.display_name, project.key, project.root, project.source_root]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(finderQuery);
+    })
+    .slice(0, 6);
+  const visibleProjects = projectShelf.slice(0, 4);
+  const visibleThreads = chatThreads.slice(0, 5);
 
   const actionNotices: ActionNotice[] = [];
   if (surfaceError) {
@@ -978,10 +1196,10 @@ export function App() {
     actionNotices.push({
       id: "brain-proposals",
       title: "A few project notes need review",
-      detail: `${brain.pending_proposals} saved note${brain.pending_proposals === 1 ? "" : "s"} are waiting in the details panel.`,
+      detail: `${brain.pending_proposals} saved note${brain.pending_proposals === 1 ? "" : "s"} are waiting in the project brain.`,
       tone: "warn",
-      primaryLabel: "Open details",
-      primaryAction: () => setShowDetails(true),
+      primaryLabel: "Refresh",
+      primaryAction: () => void refreshAll(),
     });
   }
 
@@ -1027,51 +1245,98 @@ export function App() {
           <div className="project-rail-head">
             <p className="section-eyebrow">BOSS</p>
             <h1>Projects</h1>
-            <p className="supporting-copy">Start in a project on the left. Everything else stays in the chat.</p>
+            <p className="supporting-copy">Only projects you open on purpose live here. Everything else stays in chat.</p>
           </div>
 
           <div className="project-rail-status">
             <StatusPill tone="good">Online</StatusPill>
-            <StatusPill tone={hasActiveWork ? "warn" : "neutral"}>{liveStatus.title}</StatusPill>
+            <StatusPill tone={activeProject ? "warn" : "neutral"}>
+              {activeProjectMeta?.display_name || displayProjectLabel(null, activeProject)}
+            </StatusPill>
           </div>
 
-          <div className="project-rail-list">
-            {railProjects.map((project) => {
-              const selected =
-                (project.key === null && activeProject === null) ||
-                (project.key !== null && project.key === activeProject);
-              return (
-                <button
-                  key={project.key ?? "__workspace__"}
-                  type="button"
-                  className={`project-rail-item${selected ? " active" : ""}`}
-                  onClick={() => void handleProjectSelect(project.key)}
-                >
-                  <strong>{project.label}</strong>
-                  <span>{project.meta}</span>
+          <div className="rail-actions">
+            <button type="button" className="ghost-action rail-action" onClick={() => setCreateProjectOpen(true)}>
+              New project
+            </button>
+            <button type="button" className="ghost-action rail-action" onClick={() => setFinderOpen(true)}>
+              Find on Mac
+            </button>
+          </div>
+
+          <section className="rail-section">
+            <div className="rail-section-head">
+              <p className="section-eyebrow">Projects</p>
+              {activeProject ? (
+                <button type="button" className="rail-link" onClick={() => void handleProjectSelect(null)}>
+                  Workspace
                 </button>
-              );
-            })}
-          </div>
+              ) : null}
+            </div>
+            <div className="project-rail-list">
+              {visibleProjects.length ? (
+                visibleProjects.map((project) => (
+                  <button
+                    key={project.key}
+                    type="button"
+                    className={`project-rail-item${project.key === activeProject ? " active" : ""}`}
+                    onClick={() => void handleProjectSelect(project.key)}
+                  >
+                    <strong>{project.label}</strong>
+                    <span>{project.meta}</span>
+                  </button>
+                ))
+              ) : (
+                <div className="rail-empty">
+                  <p>No saved projects yet.</p>
+                  <span>Start one or ask BOSS to find one on your Mac.</span>
+                </div>
+              )}
+            </div>
+          </section>
 
-          <label className="project-picker project-picker-compact">
-            <span>All projects</span>
-            <select
-              value={activeProject ?? "__workspace__"}
-              onChange={(event) =>
-                void handleProjectSelect(
-                  event.target.value === "__workspace__" ? null : event.target.value,
-                )
-              }
-            >
-              <option value="__workspace__">Workspace</option>
-              {projects.map((project) => (
-                <option key={project.key} value={project.key}>
-                  {project.display_name || project.key}
-                </option>
-              ))}
-            </select>
-          </label>
+          <section className="rail-section rail-section-chats">
+            <div className="rail-section-head">
+              <p className="section-eyebrow">Chats</p>
+              <button
+                type="button"
+                className="rail-link"
+                disabled={actionBusyId === "new-chat"}
+                onClick={() => void handleNewChat()}
+              >
+                {actionBusyId === "new-chat" ? "Starting..." : "New chat"}
+              </button>
+            </div>
+            <div className="chat-thread-list">
+              {visibleThreads.length ? (
+                visibleThreads.map((thread) => (
+                  <div
+                    key={thread.id}
+                    className={`chat-thread-item${thread.id === activeThreadId ? " active" : ""}`}
+                  >
+                    <button type="button" className="chat-thread-button" onClick={() => void handleThreadSelect(thread.id)}>
+                      <strong>{thread.title || "Chat"}</strong>
+                      <span>{thread.updated_at ? formatTimestamp(thread.updated_at) : "Recent"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="chat-thread-delete"
+                      aria-label={`Delete ${thread.title || "chat"}`}
+                      disabled={actionBusyId === `delete-chat-${thread.id}`}
+                      onClick={() => void handleDeleteChat(thread.id)}
+                    >
+                      {actionBusyId === `delete-chat-${thread.id}` ? "…" : "×"}
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="rail-empty">
+                  <p>No chats yet.</p>
+                  <span>Start a fresh thread when you want a clean slate.</span>
+                </div>
+              )}
+            </div>
+          </section>
         </aside>
 
         <section className="chat-shell hud-panel">
@@ -1080,12 +1345,15 @@ export function App() {
               <p className="section-eyebrow">Thread</p>
               <h2>Work with BOSS</h2>
               <p className="chat-shell-subtitle">
-                {activeProjectMeta?.display_name || projectLabel(activeProject)} ·{" "}
+                {(activeThread?.title || "Current chat")} · {activeProjectMeta?.display_name || displayProjectLabel(null, activeProject)} ·{" "}
                 {hasActiveWork ? liveStatus.detail : latestWorkSummary(runs, timeline)}
               </p>
             </div>
 
             <div className="chat-shell-actions">
+              <button type="button" className="ghost-action" onClick={() => void handleNewChat()}>
+                New chat
+              </button>
               <button type="button" className="ghost-action" onClick={() => void refreshAll()}>
                 {refreshing ? "Refreshing..." : "Refresh"}
               </button>
@@ -1188,6 +1456,91 @@ export function App() {
           </section>
         </section>
       </div>
+
+      {finderOpen ? (
+        <div className="overlay-shell" role="dialog" aria-modal="true" aria-label="Find project">
+          <button type="button" className="overlay-backdrop" aria-label="Close finder" onClick={() => setFinderOpen(false)} />
+          <section className="overlay-card hud-panel">
+            <div className="overlay-head">
+              <div>
+                <p className="section-eyebrow">Find project</p>
+                <h3>Open a project on this Mac</h3>
+              </div>
+              <button type="button" className="ghost-action" onClick={() => setFinderOpen(false)}>
+                Close
+              </button>
+            </div>
+            <label className="composer-field overlay-field">
+              <span className="field-label">Project key or absolute path</span>
+              <textarea
+                value={finderValue}
+                onChange={(event) => setFinderValue(event.target.value)}
+                rows={2}
+                placeholder="/Users/tj/code/my-app or legion"
+              />
+            </label>
+            <div className="overlay-list">
+              {finderResults.map((project) => (
+                <button
+                  key={project.key}
+                  type="button"
+                  className="project-rail-item"
+                  onClick={() => {
+                    setFinderValue(project.key);
+                    void handleProjectSelect(project.key);
+                    setFinderOpen(false);
+                  }}
+                >
+                  <strong>{project.display_name || project.key}</strong>
+                  <span>{project.root}</span>
+                </button>
+              ))}
+            </div>
+            <div className="overlay-actions">
+              <button type="button" className="ghost-action" onClick={() => setFinderOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" className="primary-action" onClick={() => void handleFindProject()}>
+                Open project
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {createProjectOpen ? (
+        <div className="overlay-shell" role="dialog" aria-modal="true" aria-label="Create project">
+          <button type="button" className="overlay-backdrop" aria-label="Close create project" onClick={() => setCreateProjectOpen(false)} />
+          <section className="overlay-card hud-panel">
+            <div className="overlay-head">
+              <div>
+                <p className="section-eyebrow">New project</p>
+                <h3>Create a fresh folder</h3>
+              </div>
+              <button type="button" className="ghost-action" onClick={() => setCreateProjectOpen(false)}>
+                Close
+              </button>
+            </div>
+            <label className="composer-field overlay-field">
+              <span className="field-label">Path or folder name</span>
+              <textarea
+                value={newProjectValue}
+                onChange={(event) => setNewProjectValue(event.target.value)}
+                rows={2}
+                placeholder="new-client-app or /Users/tj/Code/new-client-app"
+              />
+            </label>
+            <div className="overlay-actions">
+              <button type="button" className="ghost-action" onClick={() => setCreateProjectOpen(false)}>
+                Cancel
+              </button>
+              <button type="button" className="primary-action" onClick={() => void handleCreateProject()}>
+                Create project
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }

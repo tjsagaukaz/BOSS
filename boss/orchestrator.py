@@ -523,6 +523,7 @@ class BOSSOrchestrator:
         self,
         message: str,
         project_name: str | None = None,
+        thread_id: str | None = None,
         execute: bool = False,
         auto_approve: bool = False,
         intent_override: str | None = None,
@@ -530,6 +531,7 @@ class BOSSOrchestrator:
         return self.conversation_router.handle_message(
             message,
             project_name=project_name,
+            thread_id=thread_id,
             execute=execute,
             auto_approve=auto_approve,
             intent_override=intent_override,
@@ -539,6 +541,7 @@ class BOSSOrchestrator:
         self,
         message: str,
         project_name: str | None = None,
+        thread_id: str | None = None,
         execute: bool = False,
         auto_approve: bool = False,
         intent_override: str | None = None,
@@ -546,6 +549,7 @@ class BOSSOrchestrator:
         return self.conversation_router.stream_message(
             message,
             project_name=project_name,
+            thread_id=thread_id,
             execute=execute,
             auto_approve=auto_approve,
             intent_override=intent_override,
@@ -649,9 +653,38 @@ class BOSSOrchestrator:
             raise FileNotFoundError(f"MCP connector '{name}' not found.")
         return {"removed": name, "snapshot": self.mcp_snapshot()}
 
-    def conversation_history_snapshot(self, project_name: str | None = None, limit: int = 40) -> list[dict[str, Any]]:
+    def conversation_history_snapshot(
+        self,
+        project_name: str | None = None,
+        limit: int = 40,
+        thread_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         name = project_name or self.get_active_project_name()
-        return self.conversation_router.history(project_name=name, limit=limit)
+        return self.conversation_router.history(project_name=name, limit=limit, thread_id=thread_id)
+
+    def conversation_threads_snapshot(
+        self,
+        project_name: str | None = None,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        name = project_name or self.get_active_project_name()
+        return self.conversation_history.list_threads(project_name=name, limit=limit)
+
+    def latest_conversation_thread(self, project_name: str | None = None) -> dict[str, Any] | None:
+        name = project_name or self.get_active_project_name()
+        return self.conversation_history.latest_thread(project_name=name)
+
+    def create_conversation_thread(
+        self,
+        project_name: str | None = None,
+        title: str = "New chat",
+    ) -> dict[str, Any]:
+        name = project_name or self.get_active_project_name()
+        return self.conversation_history.start_thread(project_name=name, title=title)
+
+    def delete_conversation_thread(self, thread_id: str, project_name: str | None = None) -> bool:
+        name = project_name or self.get_active_project_name()
+        return self.conversation_history.delete_thread(thread_id, project_name=name)
 
     def workspace_snapshot(self, project_name: str | None = None) -> dict[str, Any]:
         target = self._normalize_project_name(project_name) or self.get_active_project_name() or "__workspace__"
