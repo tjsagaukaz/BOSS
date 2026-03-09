@@ -123,6 +123,16 @@ class ConversationRouter:
         re.compile(r"^(what'?s up|sup)(\s+boss)?[!.?]*$", re.IGNORECASE),
         re.compile(r"^(thanks|thank you)(\s+boss)?[!.?]*$", re.IGNORECASE),
     )
+    USER_PREFERENCE_PATTERNS = (
+        ("communication", re.compile(r"\b(?:be|keep|stay)\b(?:\s+\w+){0,4}\s+\b(?:brief|short|concise)\b", re.IGNORECASE), "Keep replies concise by default."),
+        ("communication", re.compile(r"\bplain language\b|\bno jargon\b|\bnormal\b", re.IGNORECASE), "Use plain language and keep the tone natural."),
+        ("workflow", re.compile(r"\bplan (?:it )?first\b|\bstart with a plan\b", re.IGNORECASE), "Plan first when the task is risky or broad."),
+        ("workflow", re.compile(r"\bjust (?:do it|ship it|build it)\b|\bdefault to execution\b", re.IGNORECASE), "Default to execution when intent is clear."),
+        ("product", re.compile(r"\bhide (?:the )?internal\b|\bkeep .*internal .*hidden\b|\binternal details .*not shown\b", re.IGNORECASE), "Keep internal system detail hidden unless explicitly requested."),
+        ("product", re.compile(r"\bdon't hardcode\b|\bdo not hardcode\b", re.IGNORECASE), "Avoid hardcoded user-facing behavior and adapt from context instead."),
+    )
+    USER_NAME_PREFERENCE_PATTERN = re.compile(r"\b(?:call me|my name is)\s+([a-z0-9][a-z0-9 .'-]{0,40})", re.IGNORECASE)
+    AVOID_NAME_PREFERENCE_PATTERN = re.compile(r"\b(?:don't|do not)\s+call me\s+([a-z0-9][a-z0-9 .'-]{0,40})", re.IGNORECASE)
 
     def __init__(
         self,
@@ -156,6 +166,7 @@ class ConversationRouter:
             raise ValueError("Message is required.")
 
         active_project = project_name or self.orchestrator.get_active_project_name()
+        self._capture_user_preferences(cleaned)
         is_small_talk = self._is_small_talk(cleaned)
 
         detected = self._detect_intent(cleaned, intent_override=intent_override, project_name_hint=active_project)
@@ -268,6 +279,7 @@ class ConversationRouter:
             raise ValueError("Message is required.")
 
         active_project = project_name or self.orchestrator.get_active_project_name()
+        self._capture_user_preferences(cleaned)
         is_small_talk = self._is_small_talk(cleaned)
         detected = self._detect_intent(cleaned, intent_override=intent_override, project_name_hint=active_project)
         if active_project and not is_small_talk:
@@ -579,6 +591,10 @@ class ConversationRouter:
             history_lines.append(f"BOSS: {item['response']}")
         if suggested_task:
             history_lines.append(f"Suggested task: {suggested_task}")
+        history_lines.append(self._session_continuity_brief(project_name, history))
+        preference_brief = self._preference_brief(project_name)
+        if preference_brief:
+            history_lines.append(preference_brief)
         history_lines.append(self._workspace_brief())
         history_lines.append(self._recent_runs_brief(project_name))
         referenced_files = self._referenced_files(message, history)
@@ -611,7 +627,7 @@ class ConversationRouter:
                 "Ground claims in project brain, workspace state, recent runs, and architecture context.",
             ],
         ).render()
-        system_prompt = self._load_system_prompt()
+        system_prompt = self._load_system_prompt(project_name=project_name)
         client = self.router.client_for_request(
             "conversation",
             prompt=prompt,
@@ -703,8 +719,8 @@ class ConversationRouter:
             "actions": response.get("actions", []),
         }
 
-    def _load_system_prompt(self) -> str:
-        persona_block = self._persona_system_prompt()
+    def _load_system_prompt(self, project_name: str | None = None) -> str:
+        persona_block = self._persona_system_prompt(project_name=project_name)
         if self.prompt_path.exists():
             prompt = self.prompt_path.read_text(encoding="utf-8").strip()
             return f"{persona_block}\n\n{prompt}".strip()
@@ -1033,7 +1049,7 @@ class ConversationRouter:
         merged["defaults"] = defaults
         return merged
 
-    def _persona_system_prompt(self) -> str:
+    def _persona_system_prompt(self, project_name: str | None = None) -> str:
         assistant_name = str(self.persona.get("assistant_name", "BOSS")).strip() or "BOSS"
         user_name = str(self.persona.get("user_name", "")).strip()
         relationship = str(self.persona.get("relationship", "engineering partner")).strip()
@@ -1042,9 +1058,14 @@ class ConversationRouter:
         communication = "\n".join(
             f"- {item}" for item in self.persona.get("communication_preferences", []) if str(item).strip()
         )
-        user_preferences = "\n".join(
-            f"- {item}" for item in self.persona.get("user_preferences", []) if str(item).strip()
-        )
+        configured_preferences = [str(item).strip() for item in self.persona.get("user_preferences", []) if str(item).strip()]
+        learned_preferences = [
+            str(item.get("preference", "")).strip()
+            for item in self.history_store.recent_preferences(project_name=project_name, limit=8)
+            if str(item.get("preference", "")).strip()
+        ]
+        merged_preferences = self._merge_unique_preferences(configured_preferences, learned_preferences)
+        user_preferences = "\n".join(f"- {item}" for item in merged_preferences)
         rules = "\n".join(f"- {item}" for item in self.persona.get("rules", []) if str(item).strip())
         banned = "\n".join(f"- {item}" for item in self.persona.get("banned_phrases", []) if str(item).strip())
         user_reference = f"{user_name}'s" if user_name else "the user's"
@@ -1067,6 +1088,93 @@ class ConversationRouter:
             f"Behavior rules:\n{rules or '- Be direct and practical.'}\n"
             f"Avoid these phrases:\n{banned or '- I am here in workspace mode'}"
         )
+
+    def _capture_user_preferences(self, message: str) -> None:
+        for category, preference in self._extract_user_preferences(message):
+            self.history_store.upsert_preference(
+                preference=preference,
+                category=category,
+                project_name=None,
+                source_message=message,
+            )
+
+    def _extract_user_preferences(self, message: str) -> list[tuple[str, str]]:
+        text = str(message or "").strip()
+        if not text:
+            return []
+        matches: list[tuple[str, str]] = []
+        for category, pattern, preference in self.USER_PREFERENCE_PATTERNS:
+            if pattern.search(text):
+                matches.append((category, preference))
+        avoid_name_match = self.AVOID_NAME_PREFERENCE_PATTERN.search(text)
+        if avoid_name_match:
+            avoided = avoid_name_match.group(1).strip(" .,!?:;")
+            if avoided:
+                matches.append(("communication", f"Do not address the user as {avoided}."))
+        name_match = self.USER_NAME_PREFERENCE_PATTERN.search(text)
+        if name_match and not avoid_name_match:
+            preferred_name = name_match.group(1).strip(" .,!?:;")
+            if preferred_name:
+                matches.append(("communication", f"Address the user as {preferred_name} when it feels natural."))
+        return self._dedupe_preferences(matches)
+
+    def _preference_brief(self, project_name: str | None) -> str:
+        preferences = self.history_store.recent_preferences(project_name=project_name, limit=6)
+        if not preferences:
+            return ""
+        lines = ["Saved User Preferences:"]
+        for item in preferences:
+            category = str(item.get("category", "general")).strip() or "general"
+            preference = str(item.get("preference", "")).strip()
+            if preference:
+                lines.append(f"- [{category}] {preference}")
+        return "\n".join(lines)
+
+    def _session_continuity_brief(self, project_name: str | None, history: list[dict[str, Any]]) -> str:
+        if not history:
+            return "Session Continuity: no prior conversation recorded."
+        last_turn = history[-1]
+        recent_intents = []
+        for item in history[-4:]:
+            intent = str(item.get("intent", "")).strip()
+            if intent and intent not in recent_intents:
+                recent_intents.append(intent)
+        last_request = self._one_line(str(last_turn.get("message", "")), limit=140)
+        last_response = self._one_line(str(last_turn.get("response", "")), limit=180)
+        scope = project_name or "workspace"
+        lines = [f"Session Continuity ({scope}):"]
+        if last_request:
+            lines.append(f"- Last user request: {last_request}")
+        if last_response:
+            lines.append(f"- Last BOSS reply: {last_response}")
+        if recent_intents:
+            lines.append(f"- Recent intents: {', '.join(recent_intents[:4])}")
+        return "\n".join(lines)
+
+    def _merge_unique_preferences(self, configured: list[str], learned: list[str]) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in [*configured, *learned]:
+            normalized = str(item).strip()
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(normalized)
+        return merged
+
+    def _dedupe_preferences(self, items: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        deduped: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for category, preference in items:
+            key = (category.strip().lower(), preference.strip().lower())
+            if not key[1] or key in seen:
+                continue
+            seen.add(key)
+            deduped.append((category, preference))
+        return deduped
 
     def _format_project_map(self, project_map: ProjectMap) -> str:
         languages = ", ".join(project_map.languages.keys()) or "Unknown"

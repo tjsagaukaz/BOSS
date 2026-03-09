@@ -559,6 +559,49 @@ def test_persona_prompt_includes_configured_preferences(tmp_path):
     assert "prefer concise updates during implementation" in persona_prompt.lower()
 
 
+def test_conversation_router_records_explicit_user_preferences(tmp_path):
+    history_store = ConversationHistoryStore(tmp_path / "boss.db")
+    router = ConversationRouter(_FakeOrchestrator(), history_store, _FakeRouter(), tmp_path)
+
+    router.handle_message("keep the replies concise and hide the internal details")
+
+    preferences = history_store.recent_preferences(limit=10)
+
+    assert any("concise" in item["preference"].lower() for item in preferences)
+    assert any("internal system detail hidden" in item["preference"].lower() for item in preferences)
+
+
+def test_persona_prompt_includes_learned_preferences(tmp_path):
+    history_store = ConversationHistoryStore(tmp_path / "boss.db")
+    history_store.upsert_preference(
+        category="communication",
+        preference="Use plain language and keep the tone natural.",
+        source_message="talk normally",
+    )
+    router = ConversationRouter(_FakeOrchestrator(), history_store, _FakeRouter(), tmp_path)
+
+    persona_prompt = router._persona_system_prompt(project_name="legion")
+
+    assert "use plain language and keep the tone natural" in persona_prompt.lower()
+
+
+def test_session_continuity_brief_uses_recent_turns(tmp_path):
+    history_store = ConversationHistoryStore(tmp_path / "boss.db")
+    history_store.append_turn(
+        project_name="legion",
+        message="fix auth",
+        response="Finished the auth fix.",
+        intent="build",
+        metadata={},
+    )
+    router = ConversationRouter(_FakeOrchestrator(), history_store, _FakeRouter(), tmp_path)
+
+    brief = router._session_continuity_brief("legion", history_store.recent(project_name="legion"))
+
+    assert "last user request: fix auth" in brief.lower()
+    assert "recent intents: build" in brief.lower()
+
+
 def test_conversation_router_can_cancel_stream(tmp_path):
     history_store = ConversationHistoryStore(tmp_path / "boss.db")
     router = ConversationRouter(_FakeOrchestrator(), history_store, _FakeRouter(), tmp_path)
