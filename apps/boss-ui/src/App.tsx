@@ -36,6 +36,19 @@ interface SummaryListItem {
   tone?: Tone;
 }
 
+interface ActionNotice {
+  id: string;
+  title: string;
+  detail: string;
+  tone: Tone;
+  primaryLabel?: string;
+  primaryDisabled?: boolean;
+  primaryAction?: () => void | Promise<void>;
+  secondaryLabel?: string;
+  secondaryDisabled?: boolean;
+  secondaryAction?: () => void | Promise<void>;
+}
+
 const QUICK_PROMPTS = [
   "Fix the highest-priority issue in the active project.",
   "Summarize what changed and tell me the next best move.",
@@ -294,6 +307,35 @@ function buildRunSummaryCopy(summary: InternalRunSummary): string {
   return parts.join(" ");
 }
 
+function latestTurnMatching(
+  turns: ChatTurn[],
+  predicate: (turn: ChatTurn) => boolean,
+): ChatTurn | null {
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    if (predicate(turns[index])) {
+      return turns[index];
+    }
+  }
+  return null;
+}
+
+function pendingCommitResult(turns: ChatTurn[]): (ChatResultPayload & { task_id: number }) | null {
+  const match = latestTurnMatching(turns, (turn) => {
+    const result = turnResult(turn);
+    if (!result || typeof result.task_id !== "number") {
+      return false;
+    }
+    const shipping = result.shipping || {};
+    const status =
+      typeof shipping.status === "string"
+        ? shipping.status
+        : result.internal_summary?.shipping_status || "";
+    return String(status).toLowerCase() === "awaiting_commit";
+  });
+  const result = match ? turnResult(match) : null;
+  return result && typeof result.task_id === "number" ? (result as ChatResultPayload & { task_id: number }) : null;
+}
+
 export function App() {
   const [backendUrl, setBackendUrl] = useState("");
   const [backendStatus, setBackendStatus] = useState<BackendStatus>("starting");
@@ -319,6 +361,7 @@ export function App() {
   const [streamingTurn, setStreamingTurn] = useState<StreamingTurn | null>(null);
   const [sending, setSending] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
+  const [actionBusyId, setActionBusyId] = useState("");
   const streamAbortRef = useRef<AbortController | null>(null);
   const activeStreamIdRef = useRef<string | null>(null);
 
@@ -606,6 +649,28 @@ export function App() {
     }
   }
 
+  async function handleCommitDecision(runId: number, decision: "approve" | "reject") {
+    if (!backendUrl) return;
+    const busyId = `${decision}-${runId}`;
+    setActionBusyId(busyId);
+    setSurfaceError("");
+    try {
+      await postJson(
+        backendUrl,
+        `/runs/${encodeURIComponent(String(runId))}/${decision === "approve" ? "commit" : "commit/reject"}`,
+        {
+          kind: "build",
+          project_name: activeProject ?? undefined,
+        },
+      );
+      await refreshAll(backendUrl, true);
+    } catch (error) {
+      setSurfaceError(String(error));
+    } finally {
+      setActionBusyId("");
+    }
+  }
+
   function openLegacyUi() {
     if (!backendUrl) return;
     window.open(`${backendUrl}/`, "_blank", "noopener,noreferrer");
@@ -617,6 +682,11 @@ export function App() {
 
   const activeProjectMeta = projects.find((project) => project.key === activeProject) ?? null;
   const chatTurns: ChatTurn[] = streamingTurn ? [...chatHistory, streamingTurn] : chatHistory;
+  const blockedTurn =
+    chatTurns.length && turnMode(chatTurns[chatTurns.length - 1]) === "blocked"
+      ? chatTurns[chatTurns.length - 1]
+      : null;
+  const commitResult = pendingCommitResult(chatTurns);
   const latestActivity = latestWorkSummary(runs, timeline);
   const focusHeadline =
     brain.brain.current_focus || brain.brain.mission || "Tell BOSS what you want done.";
@@ -714,6 +784,59 @@ export function App() {
     tone: root.enabled ? "neutral" : "warn",
   }));
 
+  const actionNotices: ActionNotice[] = [];
+  if (surfaceError) {
+    actionNotices.push({
+      id: "connection",
+      title: backendStatus === "failed" ? "Backend needs attention" : "Connection issue",
+      detail: surfaceError,
+      tone: "bad",
+      primaryLabel: backendStatus === "failed" ? "Retry launch" : "Refresh",
+      primaryAction: () => (backendStatus === "failed" ? retryLaunch() : refreshAll()),
+    });
+  }
+  if (commitResult) {
+    const shipping = commitResult.shipping || {};
+    const summary = commitResult.internal_summary;
+    actionNotices.push({
+      id: `commit-${commitResult.task_id}`,
+      title: "Commit approval needed",
+      detail:
+        (typeof shipping.message === "string" && shipping.message) ||
+        (summary ? buildRunSummaryCopy(summary) : "Review the diff, then approve or reject the pending commit."),
+      tone: "warn",
+      primaryLabel: actionBusyId === `approve-${commitResult.task_id}` ? "Approving..." : "Approve commit",
+      primaryDisabled: actionBusyId !== "",
+      primaryAction: () => handleCommitDecision(commitResult.task_id, "approve"),
+      secondaryLabel: actionBusyId === `reject-${commitResult.task_id}` ? "Rejecting..." : "Reject commit",
+      secondaryDisabled: actionBusyId !== "",
+      secondaryAction: () => handleCommitDecision(commitResult.task_id, "reject"),
+    });
+  }
+  if (blockedTurn) {
+    actionNotices.push({
+      id: `blocked-${blockedTurn.id}`,
+      title: "Execution is waiting on you",
+      detail: trimText(blockedTurn.response || "This request is ready to run when you enable changes."),
+      tone: "warn",
+      primaryLabel: "Enable changes",
+      primaryAction: () => {
+        setExecuteMode(true);
+        setComposerValue(blockedTurn.message);
+      },
+    });
+  }
+  if (brain.pending_proposals > 0) {
+    actionNotices.push({
+      id: "brain-proposals",
+      title: "Internal proposals are waiting",
+      detail: `${brain.pending_proposals} project memory proposal(s) are waiting for review.`,
+      tone: "warn",
+      primaryLabel: showDetails ? "Internal details open" : "Show internal details",
+      primaryAction: () => setShowDetails(true),
+    });
+  }
+
   if (backendStatus !== "ready") {
     const startupTone: Tone = backendStatus === "failed" ? "bad" : "warn";
     return (
@@ -809,10 +932,18 @@ export function App() {
             <p className="focus-note">Now: {latestActivity}</p>
           </section>
 
-          {surfaceError ? (
-            <section className="notice-banner tone-bad">
-              <span>Runtime notice</span>
-              <strong>{surfaceError}</strong>
+          {actionNotices.length ? (
+            <section className="action-stack">
+              <SectionHeader
+                eyebrow="Needs your input"
+                title="Action required"
+                detail={`${actionNotices.length} item${actionNotices.length === 1 ? "" : "s"}`}
+              />
+              <div className="action-notice-list">
+                {actionNotices.map((notice) => (
+                  <ActionNoticeCard key={notice.id} notice={notice} />
+                ))}
+              </div>
             </section>
           ) : null}
 
@@ -1161,6 +1292,40 @@ function ChatTurnCard(props: { turn: ChatTurn; backendUrl: string }) {
         <p>{props.turn.response || (pending ? "Thinking..." : "No response text.")}</p>
         {hasBuildRunDetails(result) ? (
           <InternalRunCard backendUrl={props.backendUrl} result={result} />
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function ActionNoticeCard(props: { notice: ActionNotice }) {
+  const { notice } = props;
+  return (
+    <article className={`action-notice-card tone-${notice.tone}`}>
+      <div className="action-notice-copy">
+        <strong>{notice.title}</strong>
+        <p>{notice.detail}</p>
+      </div>
+      <div className="action-notice-buttons">
+        {notice.secondaryLabel && notice.secondaryAction ? (
+          <button
+            type="button"
+            className="ghost-action"
+            disabled={notice.secondaryDisabled}
+            onClick={() => void notice.secondaryAction?.()}
+          >
+            {notice.secondaryLabel}
+          </button>
+        ) : null}
+        {notice.primaryLabel && notice.primaryAction ? (
+          <button
+            type="button"
+            className="primary-action"
+            disabled={notice.primaryDisabled}
+            onClick={() => void notice.primaryAction?.()}
+          >
+            {notice.primaryLabel}
+          </button>
         ) : null}
       </div>
     </article>

@@ -431,6 +431,52 @@ textarea {
   gap: 16px;
 }
 
+.action-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.action-notice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.action-notice-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.66);
+  box-shadow: var(--shadow);
+}
+
+.action-notice-copy {
+  min-width: 0;
+}
+
+.action-notice-copy strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.action-notice-copy p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.action-notice-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .composer-footer {
   display: flex;
   align-items: center;
@@ -768,7 +814,8 @@ textarea {
 
   .focus-head,
   .composer-footer,
-  .section-header {
+  .section-header,
+  .action-notice-card {
     flex-direction: column;
     align-items: flex-start;
   }
@@ -791,7 +838,8 @@ textarea {
     width: 100%;
   }
 
-  .action-group button {
+  .action-group button,
+  .action-notice-buttons button {
     flex: 1 1 0;
   }
 }
