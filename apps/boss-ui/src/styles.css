@@ -33,12 +33,13 @@
 html,
 body,
 #root {
-  min-height: 100%;
+  height: 100%;
 }
 
 body {
   margin: 0;
   min-width: 320px;
+  overflow: hidden;
   color: var(--text);
   background:
     radial-gradient(circle at top center, rgba(84, 247, 255, 0.12), transparent 28%),
@@ -72,7 +73,7 @@ textarea {
 .startup-shell,
 .workspace-shell {
   position: relative;
-  min-height: 100vh;
+  height: 100vh;
   overflow: hidden;
 }
 
@@ -109,6 +110,18 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.workspace-layout {
+  position: relative;
+  z-index: 1;
+  width: min(1520px, calc(100vw - 36px));
+  height: calc(100vh - 36px);
+  margin: 18px auto;
+  display: grid;
+  grid-template-columns: 268px minmax(0, 1fr);
+  gap: 18px;
+  overflow: hidden;
 }
 
 .hud-panel,
@@ -176,7 +189,9 @@ textarea {
 .command-bar,
 .hero-panel,
 .console-panel,
-.startup-card {
+.startup-card,
+.project-rail,
+.chat-shell {
   border-radius: 28px;
 }
 
@@ -188,6 +203,11 @@ textarea {
 
 .console-panel {
   padding: 24px 24px 0;
+}
+
+.project-rail,
+.chat-shell {
+  min-height: 0;
 }
 
 .section-eyebrow,
@@ -222,6 +242,7 @@ textarea {
 .command-bar-meta,
 .hero-panel,
 .console-head,
+.chat-shell-head,
 .composer-footer,
 .action-notice-card,
 .run-summary-head,
@@ -243,7 +264,9 @@ textarea {
 
 .brand-lockup h1,
 .startup-card h1,
-.hero-copy h2 {
+.hero-copy h2,
+.project-rail-head h1,
+.chat-shell-head h2 {
   margin: 0;
   font-family: "Oxanium", sans-serif;
   letter-spacing: 0.04em;
@@ -262,10 +285,16 @@ textarea {
   line-height: 0.98;
 }
 
+.project-rail-head h1,
+.chat-shell-head h2 {
+  font-size: 1.9rem;
+}
+
 .brand-lockup p,
 .supporting-copy,
 .helper-copy,
 .live-status-copy,
+.chat-shell-subtitle,
 .list-copy p,
 .action-notice-copy p,
 .chat-bubble p,
@@ -283,16 +312,105 @@ textarea {
   max-width: 44ch;
 }
 
+.chat-shell-subtitle {
+  margin-top: 8px;
+}
+
 .command-bar-meta,
 .command-bar-controls,
 .hero-tags,
 .prompt-row,
 .action-notice-buttons,
-.action-group {
+.action-group,
+.project-rail-status,
+.chat-shell-actions {
   display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.project-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 18px;
+  overflow: hidden;
+}
+
+.project-rail-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.project-rail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.project-rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 14px 14px 13px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(12, 22, 34, 0.88), rgba(8, 17, 29, 0.84)),
+    linear-gradient(90deg, rgba(84, 247, 255, 0.04), transparent);
+  color: var(--text);
+  text-align: left;
+  transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.project-rail-item strong {
+  display: block;
+  font-size: 0.98rem;
+}
+
+.project-rail-item span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-family: "IBM Plex Mono", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.project-rail-item:hover {
+  transform: translateY(-1px);
+  border-color: var(--line-strong);
+  box-shadow: 0 0 0 1px rgba(84, 247, 255, 0.06), 0 0 18px rgba(84, 247, 255, 0.08);
+}
+
+.project-rail-item.active {
+  border-color: rgba(84, 247, 255, 0.42);
+  background:
+    linear-gradient(180deg, rgba(18, 39, 48, 0.92), rgba(10, 24, 31, 0.9)),
+    linear-gradient(90deg, rgba(84, 247, 255, 0.12), transparent);
+  box-shadow: 0 0 24px rgba(84, 247, 255, 0.09);
+}
+
+.project-picker-compact {
+  margin-top: auto;
+}
+
+.chat-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 24px 24px 0;
+  overflow: hidden;
+}
+
+.chat-shell-head {
+  align-items: flex-start;
 }
 
 .project-picker,
@@ -550,6 +668,10 @@ textarea {
   min-height: 72vh;
 }
 
+.notice-stack-inline {
+  margin-top: 12px;
+}
+
 .console-head {
   align-items: center;
 }
@@ -641,8 +763,10 @@ textarea {
 .chat-scroll {
   min-height: 0;
   flex: 1 1 auto;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 4px;
+  margin-top: 16px;
 }
 
 .chat-feed {
@@ -770,6 +894,16 @@ textarea {
     linear-gradient(180deg, rgba(6, 13, 22, 0.12), rgba(4, 9, 16, 0.98) 22%, rgba(4, 9, 16, 0.99)),
     linear-gradient(90deg, rgba(84, 247, 255, 0.04), transparent);
   backdrop-filter: blur(18px);
+}
+
+.composer-dock-fixed {
+  position: relative;
+  bottom: auto;
+  margin-top: 0;
+}
+
+.prompt-row-compact {
+  margin-bottom: 14px;
 }
 
 .prompt-row {
@@ -999,43 +1133,56 @@ textarea {
 }
 
 @media (max-width: 1180px) {
-  .workspace-frame {
-    width: min(100vw - 28px, 1500px);
-  }
-
-  .command-bar,
-  .hero-panel {
-    padding: 20px;
-  }
-
-  .hero-panel,
-  .live-surface {
-    grid-template-columns: 1fr;
+  .workspace-layout {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+    margin: 12px auto;
+    grid-template-columns: 236px minmax(0, 1fr);
   }
 }
 
 @media (max-width: 880px) {
-  .workspace-frame {
+  .workspace-layout {
     width: calc(100vw - 20px);
-    padding-top: 12px;
+    height: calc(100vh - 20px);
+    margin: 10px auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
-  .command-bar,
-  .brand-lockup,
-  .command-bar-controls,
-  .command-bar-meta,
-  .console-head,
+  .project-rail {
+    flex-direction: row;
+    align-items: stretch;
+    padding: 18px;
+  }
+
+  .project-rail-head,
+  .project-rail-list {
+    flex: 1 1 0;
+  }
+
+  .project-rail-list {
+    flex-direction: row;
+    overflow: hidden;
+  }
+
+  .project-rail-item {
+    min-width: 150px;
+  }
+
+  .project-picker-compact {
+    margin-top: 0;
+    width: 220px;
+  }
+
+  .chat-shell-head,
   .composer-footer,
   .action-notice-card,
-  .drawer-head,
-  .drawer-footer {
+  .chat-shell-actions {
     flex-direction: column;
     align-items: flex-start;
   }
 
-  .command-bar-controls,
-  .command-bar-meta,
-  .hero-tags,
   .prompt-row,
   .action-group,
   .action-notice-buttons {
@@ -1049,8 +1196,6 @@ textarea {
   .action-group button,
   .action-notice-buttons button,
   .prompt-chip,
-  .project-picker,
-  .project-picker select,
   .ghost-action,
   .primary-action {
     width: 100%;
@@ -1061,39 +1206,39 @@ textarea {
     max-width: 100%;
   }
 
-  .composer-dock {
-    margin-left: -24px;
-    margin-right: -24px;
+  .chat-shell {
+    padding: 20px 20px 0;
+  }
+
+  .composer-dock-fixed {
+    margin-left: -20px;
+    margin-right: -20px;
+    padding-left: 20px;
+    padding-right: 20px;
   }
 }
 
 @media (max-width: 620px) {
-  .command-bar,
-  .hero-panel,
-  .console-panel,
+  .project-rail,
+  .chat-shell,
   .startup-card,
   .details-drawer {
     border-radius: 22px;
   }
 
-  .command-bar,
-  .hero-panel,
+  .project-rail,
   .startup-card {
     padding: 18px;
   }
 
-  .console-panel {
+  .chat-shell {
     padding: 18px 18px 0;
   }
 
-  .composer-dock {
+  .composer-dock-fixed {
     margin-left: -18px;
     margin-right: -18px;
     padding: 18px;
-  }
-
-  .hero-copy h2 {
-    font-size: clamp(1.8rem, 8vw, 2.6rem);
   }
 
   .signal-core,
@@ -1112,5 +1257,17 @@ textarea {
     bottom: 10px;
     width: calc(100vw - 20px);
     padding: 18px;
+  }
+
+  .project-rail {
+    flex-direction: column;
+  }
+
+  .project-rail-list {
+    flex-direction: column;
+  }
+
+  .project-picker-compact {
+    width: 100%;
   }
 }

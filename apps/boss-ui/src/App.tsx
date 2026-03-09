@@ -56,6 +56,12 @@ interface LiveFeedItem {
   tone: Tone;
 }
 
+interface ProjectRailItem {
+  key: string | null;
+  label: string;
+  meta: string;
+}
+
 const QUICK_PROMPTS = [
   "Fix the highest-priority issue in the active project.",
   "Audit the active project and tell me what matters.",
@@ -523,6 +529,45 @@ function pendingCommitResult(turns: ChatTurn[]): (ChatResultPayload & { task_id:
   return result && typeof result.task_id === "number" ? (result as ChatResultPayload & { task_id: number }) : null;
 }
 
+function projectRailItems(
+  projects: ProjectCatalogItem[],
+  activeProject: string | null,
+  limit = 7,
+): ProjectRailItem[] {
+  const items: ProjectRailItem[] = [
+    {
+      key: null,
+      label: "Workspace",
+      meta: "All projects",
+    },
+  ];
+  const sorted = [...projects].sort((left, right) =>
+    (left.display_name || left.key).localeCompare(right.display_name || right.key),
+  );
+  const activeItem = sorted.find((project) => project.key === activeProject) ?? null;
+  if (activeItem) {
+    items.push({
+      key: activeItem.key,
+      label: activeItem.display_name || activeItem.key,
+      meta: activeItem.source_root || "project",
+    });
+  }
+  for (const project of sorted) {
+    if (items.some((item) => item.key === project.key)) {
+      continue;
+    }
+    items.push({
+      key: project.key,
+      label: project.display_name || project.key,
+      meta: project.source_root || "project",
+    });
+    if (items.length >= limit + 1) {
+      break;
+    }
+  }
+  return items;
+}
+
 export function App() {
   const [backendUrl, setBackendUrl] = useState("");
   const [backendStatus, setBackendStatus] = useState<BackendStatus>("starting");
@@ -884,77 +929,8 @@ export function App() {
       ? chatTurns[chatTurns.length - 1]
       : null;
   const commitResult = pendingCommitResult(chatTurns);
-  const focusHeadline =
-    brain.brain.current_focus || brain.brain.mission || "Describe the outcome you want.";
-  const focusDescription =
-    brain.brain.current_focus && brain.brain.mission
-      ? brain.brain.mission
-      : "BOSS keeps the internal machinery behind the scenes and reports back here with the work that matters.";
   const liveStatus = currentLiveItem(activities, timeline, runs, streamingTurn);
-  const liveFeedItems = buildLiveFeed(timeline);
-  const terminalEntries = (workspace.recent_terminal_commands || []).slice(0, 3);
-  const showLiveSurface = hasActiveWork || liveFeedItems.length > 0 || terminalEntries.length > 0;
-
-  const suggestedItems: SummaryListItem[] = (brain.brain.next_priorities || []).slice(0, 4).map((item) => ({
-    title: item,
-    detail: "Suggested next move",
-  }));
-
-  const watchItems: SummaryListItem[] = (brain.brain.known_risks || []).slice(0, 4).map((item) => ({
-    title: item,
-    detail: "Reported risk",
-    tone: "warn",
-  }));
-
-  const recentOutcomeItems: SummaryListItem[] = runs.length
-    ? runs.slice(0, 5).map((run) => ({
-        title: run.title || String(run.identifier || "Untitled run"),
-        detail: [formatStatus(run.status), run.project_name || "workspace"].filter(Boolean).join(" · "),
-        meta: formatTimestamp(run.timestamp),
-        tone: statusTone(run.status),
-      }))
-    : timeline
-        .filter((event) => !isInternalTimelineEvent(event))
-        .slice(0, 5)
-        .map((event) => ({
-          title: event.title || "Recent update",
-          detail: timelineDetail(event),
-          meta: formatTimestamp(event.timestamp),
-          tone: statusTone(event.status),
-        }));
-
-  const rawActivityItems: SummaryListItem[] = activities.length
-    ? activities.slice(0, 5).map((item) => ({
-        title: `${formatStatus(item.agent)} · ${formatStatus(item.status)}`,
-        detail: trimText(item.message || "Idle"),
-        meta: item.project_name || "workspace",
-        tone: statusTone(item.status),
-      }))
-    : [];
-
-  const runItems: SummaryListItem[] = runs.slice(0, 5).map((run) => ({
-    title: run.title || String(run.identifier || "Untitled run"),
-    detail: [run.kind || "run", run.project_name || "workspace"].filter(Boolean).join(" · "),
-    meta: `${formatStatus(run.status)} · ${formatTimestamp(run.timestamp)}`,
-    tone: statusTone(run.status),
-  }));
-
-  const recentEditItems: SummaryListItem[] = (workspace.recent_edits || []).slice(0, 5).map((item, index) => ({
-    title: item.file || item.path || `Edit ${index + 1}`,
-    detail: item.summary || item.type || "Recorded workspace edit",
-  }));
-
-  const openFileItems: SummaryListItem[] = (workspace.open_files || []).slice(0, 5).map((file) => ({
-    title: file,
-    detail: "Open in the tracked workspace",
-  }));
-
-  const rootItems: SummaryListItem[] = (roots.roots || []).slice(0, 5).map((root) => ({
-    title: root.name,
-    detail: root.path,
-    meta: `${root.mode}${root.enabled ? "" : " · disabled"}`,
-    tone: root.enabled ? "neutral" : "warn",
-  }));
+  const railProjects = projectRailItems(projects, activeProject, 8);
 
   const actionNotices: ActionNotice[] = [];
   if (surfaceError) {
@@ -1046,109 +1022,82 @@ export function App() {
       <div className="hud-grid" />
       <div className="hud-noise" />
 
-      <div className="workspace-frame">
-        <header className="command-bar hud-panel">
-          <div className="brand-lockup">
+      <div className="workspace-layout">
+        <aside className="project-rail hud-panel">
+          <div className="project-rail-head">
             <p className="section-eyebrow">BOSS</p>
-            <div>
-              <h1>Adaptive coding console</h1>
-              <p>One thread, live work updates, terminal traces, and the rest tucked away.</p>
-            </div>
+            <h1>Projects</h1>
+            <p className="supporting-copy">Start in a project on the left. Everything else stays in the chat.</p>
           </div>
 
-          <div className="command-bar-meta">
+          <div className="project-rail-status">
             <StatusPill tone="good">Online</StatusPill>
             <StatusPill tone={hasActiveWork ? "warn" : "neutral"}>{liveStatus.title}</StatusPill>
           </div>
 
-          <div className="command-bar-controls">
-            <label className="project-picker">
-              <span>Project</span>
-              <select
-                value={activeProject ?? "__workspace__"}
-                onChange={(event) =>
-                  void handleProjectSelect(
-                    event.target.value === "__workspace__" ? null : event.target.value,
-                  )
-                }
-              >
-                <option value="__workspace__">Workspace</option>
-                {projects.map((project) => (
-                  <option key={project.key} value={project.key}>
-                    {project.display_name || project.key}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <button type="button" className="ghost-action" onClick={() => void refreshAll()}>
-              {refreshing ? "Refreshing..." : "Refresh"}
-            </button>
-
-            <button type="button" className="ghost-action" onClick={() => setShowDetails(true)}>
-              Details
-            </button>
-          </div>
-        </header>
-
-        <section className="hero-panel hud-panel">
-          <div className="hero-copy">
-            <p className="section-eyebrow">Current mission</p>
-            <h2>{focusHeadline}</h2>
-            <p className="supporting-copy">{focusDescription}</p>
-
-            <div className="hero-tags">
-              <StatusPill tone="neutral">Project · {projectLabel(activeProject)}</StatusPill>
-              <StatusPill tone={executeMode ? "warn" : "neutral"}>
-                {executeMode ? "Build mode" : "Chat mode"}
-              </StatusPill>
-              <StatusPill tone={statusTone(health.status)}>
-                {hasActiveWork ? liveStatus.detail : latestWorkSummary(runs, timeline)}
-              </StatusPill>
-            </div>
-
-            <p className="hero-footnote">
-              Root: {activeProjectMeta?.root || roots.primary_root || "Workspace root not loaded."}
-            </p>
+          <div className="project-rail-list">
+            {railProjects.map((project) => {
+              const selected =
+                (project.key === null && activeProject === null) ||
+                (project.key !== null && project.key === activeProject);
+              return (
+                <button
+                  key={project.key ?? "__workspace__"}
+                  type="button"
+                  className={`project-rail-item${selected ? " active" : ""}`}
+                  onClick={() => void handleProjectSelect(project.key)}
+                >
+                  <strong>{project.label}</strong>
+                  <span>{project.meta}</span>
+                </button>
+              );
+            })}
           </div>
 
-          <div className="signal-core">
-            <div className="signal-ring signal-ring-one" />
-            <div className="signal-ring signal-ring-two" />
-            <div className="signal-ring signal-ring-three" />
-            <div className="signal-center">
-              <strong>{hasActiveWork ? "LIVE" : "READY"}</strong>
-              <span>{formatTimestamp(workspace.updated_at || brain.brain.updated_at)}</span>
-            </div>
-          </div>
-        </section>
+          <label className="project-picker project-picker-compact">
+            <span>All projects</span>
+            <select
+              value={activeProject ?? "__workspace__"}
+              onChange={(event) =>
+                void handleProjectSelect(
+                  event.target.value === "__workspace__" ? null : event.target.value,
+                )
+              }
+            >
+              <option value="__workspace__">Workspace</option>
+              {projects.map((project) => (
+                <option key={project.key} value={project.key}>
+                  {project.display_name || project.key}
+                </option>
+              ))}
+            </select>
+          </label>
+        </aside>
 
-        {actionNotices.length ? (
-          <section className="notice-stack">
-            {actionNotices.map((notice) => (
-              <ActionNoticeCard key={notice.id} notice={notice} />
-            ))}
-          </section>
-        ) : null}
-
-        <section className="console-panel hud-panel">
-          <div className="console-head">
+        <section className="chat-shell hud-panel">
+          <div className="chat-shell-head">
             <div>
               <p className="section-eyebrow">Thread</p>
-              <h3>Work with BOSS</h3>
+              <h2>Work with BOSS</h2>
+              <p className="chat-shell-subtitle">
+                {activeProjectMeta?.display_name || projectLabel(activeProject)} ·{" "}
+                {hasActiveWork ? liveStatus.detail : latestWorkSummary(runs, timeline)}
+              </p>
             </div>
-            <span className="section-detail">
-              {chatTurns.length ? `${chatTurns.length} turn${chatTurns.length === 1 ? "" : "s"}` : "Ready"}
-            </span>
+
+            <div className="chat-shell-actions">
+              <button type="button" className="ghost-action" onClick={() => void refreshAll()}>
+                {refreshing ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
           </div>
 
-          {showLiveSurface ? (
-            <LiveSurface
-              liveStatus={liveStatus}
-              liveFeedItems={liveFeedItems}
-              terminalEntries={terminalEntries}
-              hasActiveWork={hasActiveWork}
-            />
+          {actionNotices.length ? (
+            <section className="notice-stack notice-stack-inline">
+              {actionNotices.map((notice) => (
+                <ActionNoticeCard key={notice.id} notice={notice} />
+              ))}
+            </section>
           ) : null}
 
           <div ref={chatScrollRef} className="chat-scroll">
@@ -1167,8 +1116,8 @@ export function App() {
             </div>
           </div>
 
-          <section className="composer-dock">
-            <div className="prompt-row">
+          <section className="composer-dock composer-dock-fixed">
+            <div className="prompt-row prompt-row-compact">
               {QUICK_PROMPTS.map((prompt) => (
                 <button
                   key={prompt}
@@ -1216,7 +1165,7 @@ export function App() {
               </div>
 
               <p className="helper-copy">
-                {projectLabel(activeProject)} · Cmd/Ctrl+Enter to send
+                {chatTurns.length ? `${chatTurns.length} turns` : "Ready"} · Cmd/Ctrl+Enter to send
               </p>
 
               <div className="action-group">
@@ -1239,25 +1188,6 @@ export function App() {
           </section>
         </section>
       </div>
-
-      {showDetails ? (
-        <DetailsDrawer
-          onClose={() => setShowDetails(false)}
-          onOpenLegacyUi={openLegacyUi}
-          suggestedItems={suggestedItems}
-          watchItems={watchItems}
-          recentOutcomeItems={recentOutcomeItems}
-          rawActivityItems={rawActivityItems}
-          runItems={runItems}
-          recentEditItems={recentEditItems}
-          openFileItems={openFileItems}
-          rootItems={rootItems}
-          health={health}
-          permissions={permissions}
-          metrics={metrics}
-          workspace={workspace}
-        />
-      ) : null}
     </main>
   );
 }
