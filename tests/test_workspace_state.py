@@ -7,6 +7,7 @@ def test_workspace_state_records_editor_and_terminal_signals(tmp_path):
     store = WorkspaceStateStore(tmp_path / "workspace.json")
     editor = EditorListener(store)
     terminal = TerminalListener(store)
+    long_stdout = "x" * 1500
 
     store.set_active_project("legion")
     editor.file_opened("legion", "auth.py")
@@ -15,7 +16,7 @@ def test_workspace_state_records_editor_and_terminal_signals(tmp_path):
         "legion",
         command="pytest",
         workdir="/tmp/legion",
-        result={"command": "pytest", "exit_code": 1, "stdout": "", "stderr": "failed"},
+        result={"command": "pytest", "exit_code": 1, "stdout": long_stdout, "stderr": "failed"},
     )
 
     snapshot = store.snapshot("legion")
@@ -24,6 +25,7 @@ def test_workspace_state_records_editor_and_terminal_signals(tmp_path):
     assert snapshot.recent_edits[0]["file"] == "auth.py"
     assert snapshot.last_terminal_command == "pytest"
     assert snapshot.recent_events[0]["type"] == "terminal_command"
+    assert len(snapshot.last_terminal_result["stdout"]) == 1200
 
 
 def test_workspace_state_tracks_failed_tests(tmp_path):

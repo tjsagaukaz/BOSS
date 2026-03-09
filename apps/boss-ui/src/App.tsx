@@ -6,21 +6,20 @@ import type {
   ActivityItem,
   BrainSnapshot,
   BuildTaskStep,
-  ChatResultPayload,
   ChatHistoryTurn,
+  ChatResultPayload,
   CommandCenterSnapshot,
   HealthSnapshot,
   InternalRunSummary,
   MetricSnapshot,
   PermissionSnapshot,
   ProjectCatalogItem,
-  RecommendationItem,
-  RiskItem,
-  RunDetailsResponse,
   RootSnapshot,
+  RunDetailsResponse,
   RunSummary,
   StreamEvent,
   StreamingTurn,
+  TerminalCommandRecord,
   TimelineEvent,
   WorkspaceSnapshot,
 } from "./types";
@@ -49,19 +48,29 @@ interface ActionNotice {
   secondaryAction?: () => void | Promise<void>;
 }
 
+interface LiveFeedItem {
+  id: string;
+  title: string;
+  detail: string;
+  meta?: string;
+  tone: Tone;
+}
+
 const QUICK_PROMPTS = [
   "Fix the highest-priority issue in the active project.",
-  "Summarize what changed and tell me the next best move.",
-  "Audit the current project for blockers.",
+  "Audit the active project and tell me what matters.",
+  "Summarize what changed and tell me the next move.",
 ];
 
-const REFRESH_INTERVAL_MS = 5000;
+const IDLE_REFRESH_INTERVAL_MS = 5000;
+const LIVE_REFRESH_INTERVAL_MS = 1200;
 const INTERNAL_AGENTS = new Set(["architect", "engineer", "test", "auditor"]);
 
 const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   active_project: "__workspace__",
   open_files: [],
   recent_edits: [],
+  recent_events: [],
   recent_terminal_commands: [],
   last_terminal_command: "",
   last_terminal_result: {},
@@ -168,6 +177,20 @@ function projectLabel(projectName: string | null): string {
   return projectName;
 }
 
+function trimText(value: string | undefined, limit = 220): string {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1).trimEnd()}…`;
+}
+
+function trimBlock(value: string | undefined, limit = 960): string {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1).trimEnd()}…`;
+}
+
 function turnMode(turn: ChatTurn): string {
   if ("pending" in turn) {
     return turn.metadata.mode || "chat";
@@ -177,20 +200,19 @@ function turnMode(turn: ChatTurn): string {
   return typeof mode === "string" ? mode : "chat";
 }
 
-function healthTone(status: string): Tone {
-  const normalized = status.toLowerCase();
-  if (normalized === "stable" || normalized === "healthy") return "good";
-  if (normalized === "degraded" || normalized === "warning") return "warn";
-  if (normalized === "failed" || normalized === "critical") return "bad";
+function statusTone(status?: string | null): Tone {
+  const normalized = String(status || "unknown").toLowerCase();
+  if (normalized === "stable" || normalized === "healthy" || normalized === "completed") return "good";
+  if (normalized === "running" || normalized === "queued" || normalized === "planning" || normalized === "reviewing") {
+    return "warn";
+  }
+  if (normalized === "failed" || normalized === "critical" || normalized === "error") return "bad";
   return "neutral";
 }
 
-function runTone(status?: string | null): Tone {
-  const normalized = String(status || "unknown").toLowerCase();
-  if (normalized === "completed" || normalized === "healthy") return "good";
-  if (normalized === "running" || normalized === "queued") return "warn";
-  if (normalized === "failed" || normalized === "error") return "bad";
-  return "neutral";
+function isWorkingStatus(status?: string | null): boolean {
+  const normalized = String(status || "").toLowerCase();
+  return ["queued", "running", "planning", "reviewing"].includes(normalized);
 }
 
 function workspaceTestSummary(workspace: WorkspaceSnapshot): string {
@@ -206,20 +228,21 @@ function workspaceTestSummary(workspace: WorkspaceSnapshot): string {
 }
 
 function latestActivitySummary(activities: ActivityItem[], timeline: TimelineEvent[]): string {
+  const active = activities.find((item) => isWorkingStatus(item.status));
+  if (active) {
+    return activityDetail(active);
+  }
   const lastEvent = timeline[0];
   if (lastEvent?.title || lastEvent?.message) {
-    return lastEvent.message || lastEvent.title || "Waiting for the next task.";
+    return timelineDetail(lastEvent);
   }
-  return "Waiting for the next task.";
+  return "Waiting for the next request.";
 }
 
 function latestWorkSummary(runs: RunSummary[], timeline: TimelineEvent[]): string {
-  const running = runs.find((item) => {
-    const status = String(item.status || "").toLowerCase();
-    return status === "running" || status === "queued";
-  });
+  const running = runs.find((item) => isWorkingStatus(item.status));
   if (running) {
-    return `BOSS is working on ${running.title || "the active run"}.`;
+    return `Working on ${running.title || "the active request"}.`;
   }
   const latestRun = runs[0];
   if (latestRun) {
@@ -230,6 +253,195 @@ function latestWorkSummary(runs: RunSummary[], timeline: TimelineEvent[]): strin
 
 function isInternalTimelineEvent(event: TimelineEvent): boolean {
   return INTERNAL_AGENTS.has(String(event.agent || "").toLowerCase());
+}
+
+function userFacingStage(agent?: string | null, status?: string | null): string {
+  const normalized = String(agent || "").toLowerCase();
+  const state = String(status || "").toLowerCase();
+  if (normalized === "architect") {
+    return state === "completed" ? "Plan ready" : "Mapping the change";
+  }
+  if (normalized === "engineer") {
+    return state === "completed" ? "Code updated" : "Editing the project";
+  }
+  if (normalized === "test") {
+    return state === "failed" ? "Checks failed" : state === "completed" ? "Checks complete" : "Running checks";
+  }
+  if (normalized === "auditor") {
+    return state === "failed" ? "Review found issues" : state === "completed" ? "Review complete" : "Checking the result";
+  }
+  if (normalized === "research") {
+    return "Gathering context";
+  }
+  return formatStatus(status || agent || "Working");
+}
+
+function sanitizeInternalMessage(agent?: string | null, message?: string | null): string {
+  const text = String(message || "").trim();
+  if (!text || /^idle$/i.test(text)) {
+    return "Standing by.";
+  }
+  const normalized = String(agent || "").toLowerCase();
+  if (normalized === "architect") {
+    if (text.startsWith("Generating plan for:") || text.startsWith("Creating execution plan for:")) {
+      return "Working out the safest way to make the change.";
+    }
+    if (/planning skipped/i.test(text)) {
+      return "Skipping planning and moving straight into the change.";
+    }
+    return trimText(text);
+  }
+  if (normalized === "engineer") {
+    if (/implementing code changes/i.test(text) || /applying audit feedback/i.test(text)) {
+      return "Editing files and wiring the change through the project.";
+    }
+    return trimText(text);
+  }
+  if (normalized === "test") {
+    if (/running project tests/i.test(text)) {
+      return "Running validation against the current project.";
+    }
+    return trimText(text);
+  }
+  if (normalized === "auditor") {
+    if (/reviewing/i.test(text)) {
+      return "Checking the result for regressions and missed edges.";
+    }
+    if (/audit requested fixes/i.test(text)) {
+      return "Review found issues that still need fixing.";
+    }
+    return trimText(text);
+  }
+  return trimText(text);
+}
+
+function activityDetail(activity: ActivityItem): string {
+  return sanitizeInternalMessage(activity.agent, activity.message);
+}
+
+function timelineTitle(event: TimelineEvent): string {
+  const agent = String(event.agent || "").toLowerCase();
+  const title = String(event.title || "").trim();
+  if (agent && INTERNAL_AGENTS.has(agent)) {
+    if (/planning/i.test(title)) {
+      return "Plan";
+    }
+    if (/implementation|retry/i.test(title)) {
+      return "Code";
+    }
+    if (/audit|review/i.test(title)) {
+      return "Review";
+    }
+    if (/test/i.test(title)) {
+      return "Checks";
+    }
+    return userFacingStage(agent, event.status);
+  }
+  return trimText(title || "Recent update", 80);
+}
+
+function timelineDetail(event: TimelineEvent): string {
+  const agent = String(event.agent || "").toLowerCase();
+  const message = String(event.message || "").trim();
+  if (agent && INTERNAL_AGENTS.has(agent)) {
+    if (message) {
+      return sanitizeInternalMessage(agent, message);
+    }
+    return userFacingStage(agent, event.status);
+  }
+  return trimText(message || titleFallback(event.title), 180);
+}
+
+function titleFallback(value?: string | null): string {
+  return trimText(String(value || "Recent update"), 80);
+}
+
+function buildLiveFeed(timeline: TimelineEvent[]): LiveFeedItem[] {
+  return timeline
+    .filter((event) => String(event.status || "").toLowerCase() !== "idle")
+    .slice(0, 6)
+    .map((event) => ({
+      id: `${event.sequence || event.timestamp || event.title || "event"}`,
+      title: timelineTitle(event),
+      detail: timelineDetail(event),
+      meta: formatTimestamp(event.timestamp),
+      tone: statusTone(event.status),
+    }));
+}
+
+function currentLiveItem(
+  activities: ActivityItem[],
+  timeline: TimelineEvent[],
+  runs: RunSummary[],
+  streamingTurn: StreamingTurn | null,
+): LiveFeedItem {
+  const active = activities.find((item) => isWorkingStatus(item.status));
+  if (active) {
+    return {
+      id: `activity-${active.agent}`,
+      title: userFacingStage(active.agent, active.status),
+      detail: activityDetail(active),
+      meta: active.project_name || "workspace",
+      tone: statusTone(active.status),
+    };
+  }
+  const runningRun = runs.find((item) => isWorkingStatus(item.status));
+  if (runningRun) {
+    return {
+      id: `run-${runningRun.identifier || runningRun.title || "active"}`,
+      title: "Working on your request",
+      detail: runningRun.title || "Processing the current run.",
+      meta: projectLabel(runningRun.project_name || null),
+      tone: statusTone(runningRun.status),
+    };
+  }
+  if (streamingTurn?.pending) {
+    return {
+      id: "streaming",
+      title: "Writing back",
+      detail: "BOSS is preparing the reply now.",
+      tone: "warn",
+    };
+  }
+  const latest = timeline[0];
+  if (latest) {
+    return {
+      id: `timeline-${latest.sequence || latest.timestamp || "latest"}`,
+      title: timelineTitle(latest),
+      detail: timelineDetail(latest),
+      meta: formatTimestamp(latest.timestamp),
+      tone: statusTone(latest.status),
+    };
+  }
+  return {
+    id: "idle",
+    title: "Ready",
+    detail: "Tell BOSS what outcome you want.",
+    tone: "good",
+  };
+}
+
+function terminalTone(entry: TerminalCommandRecord): Tone {
+  if (typeof entry.exit_code !== "number") return "neutral";
+  return entry.exit_code === 0 ? "good" : "bad";
+}
+
+function formatFileSummary(files: string[] | undefined, limit = 3): string {
+  const entries = (files || []).filter(Boolean);
+  if (!entries.length) return "No file changes recorded.";
+  if (entries.length <= limit) return entries.join(", ");
+  return `${entries.slice(0, limit).join(", ")} +${entries.length - limit} more`;
+}
+
+function testOutputSummary(step: BuildTaskStep): string {
+  const output = step.test_output || {};
+  const passed = output.passed;
+  const message = typeof output.message === "string" ? output.message : "";
+  const failure = typeof output.failure_summary === "string" ? output.failure_summary : "";
+  if (typeof passed === "boolean") {
+    return passed ? "Checks passed." : failure || message || "Checks failed.";
+  }
+  return message || failure || "No dedicated check result was captured.";
 }
 
 function turnResult(turn: ChatTurn): ChatResultPayload | null {
@@ -254,31 +466,6 @@ function hasBuildRunDetails(result: ChatResultPayload | null): result is ChatRes
   );
 }
 
-function trimText(value: string | undefined, limit = 240): string {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (!text) return "";
-  if (text.length <= limit) return text;
-  return `${text.slice(0, limit - 1).trimEnd()}…`;
-}
-
-function formatFileSummary(files: string[] | undefined, limit = 3): string {
-  const entries = (files || []).filter(Boolean);
-  if (!entries.length) return "No file changes recorded.";
-  if (entries.length <= limit) return entries.join(", ");
-  return `${entries.slice(0, limit).join(", ")} +${entries.length - limit} more`;
-}
-
-function testOutputSummary(step: BuildTaskStep): string {
-  const output = step.test_output || {};
-  const passed = output.passed;
-  const message = typeof output.message === "string" ? output.message : "";
-  const failure = typeof output.failure_summary === "string" ? output.failure_summary : "";
-  if (typeof passed === "boolean") {
-    return passed ? "Tests passed." : failure || message || "Tests failed.";
-  }
-  return message || failure || "No dedicated test result captured.";
-}
-
 function buildRunSummaryCopy(summary: InternalRunSummary): string {
   const totalSteps = Number(summary.total_steps || 0);
   const completedSteps = Number(summary.completed_steps || 0);
@@ -287,8 +474,8 @@ function buildRunSummaryCopy(summary: InternalRunSummary): string {
   const changedFilesCount = Number(summary.changed_files_count || 0);
   const parts: string[] = [];
   if (totalSteps) {
-    parts.push(`Architect planned ${totalSteps} step${totalSteps === 1 ? "" : "s"}.`);
-    parts.push(`Execution completed ${completedSteps}/${totalSteps} step${totalSteps === 1 ? "" : "s"}.`);
+    parts.push(`Plan covered ${totalSteps} step${totalSteps === 1 ? "" : "s"}.`);
+    parts.push(`Finished ${completedSteps}/${totalSteps}.`);
   } else {
     parts.push("Execution details are available for this run.");
   }
@@ -296,7 +483,7 @@ function buildRunSummaryCopy(summary: InternalRunSummary): string {
     parts.push(`${failedSteps} step${failedSteps === 1 ? "" : "s"} still need follow-up.`);
   }
   if (retries) {
-    parts.push(`${retries} retr${retries === 1 ? "y" : "ies"} across the run.`);
+    parts.push(`${retries} retr${retries === 1 ? "y" : "ies"} happened during the run.`);
   }
   if (changedFilesCount) {
     parts.push(`Changed ${changedFilesCount} file${changedFilesCount === 1 ? "" : "s"}.`);
@@ -344,8 +531,6 @@ export function App() {
   const [activeProject, setActiveProjectState] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(EMPTY_WORKSPACE);
   const [brain, setBrain] = useState<BrainSnapshot>(EMPTY_BRAIN);
-  const [recommendations, setRecommendations] = useState<RecommendationItem[]>([]);
-  const [risks, setRisks] = useState<RiskItem[]>([]);
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [health, setHealth] = useState<HealthSnapshot>(EMPTY_HEALTH);
@@ -364,6 +549,14 @@ export function App() {
   const [actionBusyId, setActionBusyId] = useState("");
   const streamAbortRef = useRef<AbortController | null>(null);
   const activeStreamIdRef = useRef<string | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const hasActiveRun = runs.some((item) => isWorkingStatus(item.status));
+  const hasActiveWork =
+    Boolean(streamingTurn?.pending) ||
+    hasActiveRun ||
+    activities.some((item) => isWorkingStatus(item.status));
+  const refreshInterval = hasActiveWork ? LIVE_REFRESH_INTERVAL_MS : IDLE_REFRESH_INTERVAL_MS;
 
   useEffect(() => {
     let active = true;
@@ -400,9 +593,15 @@ export function App() {
     if (backendStatus !== "ready" || !backendUrl) return;
     const interval = window.setInterval(() => {
       void refreshAll(backendUrl, true);
-    }, REFRESH_INTERVAL_MS);
+    }, refreshInterval);
     return () => window.clearInterval(interval);
-  }, [backendStatus, backendUrl]);
+  }, [backendStatus, backendUrl, refreshInterval]);
+
+  useEffect(() => {
+    const node = chatScrollRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [chatHistory.length, streamingTurn?.response, streamingTurn?.pending]);
 
   async function refreshAll(url = backendUrl, background = false) {
     if (!url) return;
@@ -435,8 +634,6 @@ export function App() {
       setActiveProjectState(snapshot.projects.active_project ?? null);
       setWorkspace(snapshot.workspace);
       setBrain(snapshot.brain);
-      setRecommendations(snapshot.next.recommendations ?? []);
-      setRisks(snapshot.risks.risks ?? []);
       setActivities(snapshot.activity.activities ?? []);
       setTimeline(snapshot.timeline.events ?? []);
       setHealth(snapshot.health);
@@ -687,84 +884,59 @@ export function App() {
       ? chatTurns[chatTurns.length - 1]
       : null;
   const commitResult = pendingCommitResult(chatTurns);
-  const latestActivity = latestWorkSummary(runs, timeline);
   const focusHeadline =
-    brain.brain.current_focus || brain.brain.mission || "Tell BOSS what you want done.";
+    brain.brain.current_focus || brain.brain.mission || "Describe the outcome you want.";
   const focusDescription =
     brain.brain.current_focus && brain.brain.mission
       ? brain.brain.mission
-      : "Ask for a fix, an audit, or a summary. System detail stays tucked away unless you open it.";
+      : "BOSS keeps the internal machinery behind the scenes and reports back here with the work that matters.";
+  const liveStatus = currentLiveItem(activities, timeline, runs, streamingTurn);
+  const liveFeedItems = buildLiveFeed(timeline);
+  const terminalEntries = (workspace.recent_terminal_commands || []).slice(0, 3);
+  const showLiveSurface = hasActiveWork || liveFeedItems.length > 0 || terminalEntries.length > 0;
 
-  const suggestedItems: SummaryListItem[] = recommendations.length
-    ? recommendations.slice(0, 3).map((item) => ({
-        title: item.title,
-        detail: item.reason || item.source || "Suggested next step",
-      }))
-    : (brain.brain.next_priorities || []).slice(0, 3).map((item) => ({
-        title: item,
-        detail: "Project priority",
-      }));
-
-  const watchItems: SummaryListItem[] = risks.slice(0, 3).map((item) => ({
-    title: item.title,
-    detail: item.reason || item.severity || "Reported risk",
-    tone: item.severity?.toLowerCase() === "high" ? "bad" : "warn",
+  const suggestedItems: SummaryListItem[] = (brain.brain.next_priorities || []).slice(0, 4).map((item) => ({
+    title: item,
+    detail: "Suggested next move",
   }));
 
-  const recentWorkItems: SummaryListItem[] = runs.length
-    ? runs.slice(0, 4).map((run) => ({
+  const watchItems: SummaryListItem[] = (brain.brain.known_risks || []).slice(0, 4).map((item) => ({
+    title: item,
+    detail: "Reported risk",
+    tone: "warn",
+  }));
+
+  const recentOutcomeItems: SummaryListItem[] = runs.length
+    ? runs.slice(0, 5).map((run) => ({
         title: run.title || String(run.identifier || "Untitled run"),
         detail: [formatStatus(run.status), run.project_name || "workspace"].filter(Boolean).join(" · "),
         meta: formatTimestamp(run.timestamp),
-        tone: runTone(run.status),
+        tone: statusTone(run.status),
       }))
     : timeline
         .filter((event) => !isInternalTimelineEvent(event))
-        .slice(0, 4)
+        .slice(0, 5)
         .map((event) => ({
-          title: event.title || "Event",
-          detail: event.message || event.status || "Recent activity",
+          title: event.title || "Recent update",
+          detail: timelineDetail(event),
           meta: formatTimestamp(event.timestamp),
-          tone:
-            event.status === "failed"
-              ? "bad"
-              : event.status === "completed"
-                ? "good"
-                : "neutral",
+          tone: statusTone(event.status),
         }));
 
-  const agentActivityItems: SummaryListItem[] = activities.length
-    ? activities.slice(0, 4).map((item) => ({
-        title: item.agent,
-        detail: item.message || item.status || "Idle",
+  const rawActivityItems: SummaryListItem[] = activities.length
+    ? activities.slice(0, 5).map((item) => ({
+        title: `${formatStatus(item.agent)} · ${formatStatus(item.status)}`,
+        detail: trimText(item.message || "Idle"),
         meta: item.project_name || "workspace",
-        tone: item.status === "running" ? "warn" : item.status === "failed" ? "bad" : "neutral",
+        tone: statusTone(item.status),
       }))
-    : timeline
-        .filter((event) => isInternalTimelineEvent(event))
-        .slice(0, 4)
-        .map((event) => ({
-          title: event.agent || event.title || "Agent",
-          detail: event.message || event.status || "Idle",
-          meta: formatTimestamp(event.timestamp),
-          tone:
-            event.status === "failed"
-              ? "bad"
-              : event.status === "completed"
-                ? "good"
-                : "warn",
-        }));
+    : [];
 
   const runItems: SummaryListItem[] = runs.slice(0, 5).map((run) => ({
     title: run.title || String(run.identifier || "Untitled run"),
     detail: [run.kind || "run", run.project_name || "workspace"].filter(Boolean).join(" · "),
     meta: `${formatStatus(run.status)} · ${formatTimestamp(run.timestamp)}`,
-    tone: runTone(run.status),
-  }));
-
-  const openFileItems: SummaryListItem[] = (workspace.open_files || []).slice(0, 5).map((file) => ({
-    title: file,
-    detail: "Open in the tracked workspace",
+    tone: statusTone(run.status),
   }));
 
   const recentEditItems: SummaryListItem[] = (workspace.recent_edits || []).slice(0, 5).map((item, index) => ({
@@ -772,9 +944,9 @@ export function App() {
     detail: item.summary || item.type || "Recorded workspace edit",
   }));
 
-  const openProblemItems: SummaryListItem[] = (brain.brain.open_problems || []).slice(0, 5).map((item) => ({
-    title: item,
-    detail: "Needs attention",
+  const openFileItems: SummaryListItem[] = (workspace.open_files || []).slice(0, 5).map((file) => ({
+    title: file,
+    detail: "Open in the tracked workspace",
   }));
 
   const rootItems: SummaryListItem[] = (roots.roots || []).slice(0, 5).map((root) => ({
@@ -788,7 +960,7 @@ export function App() {
   if (surfaceError) {
     actionNotices.push({
       id: "connection",
-      title: backendStatus === "failed" ? "Backend needs attention" : "Connection issue",
+      title: backendStatus === "failed" ? "Connection lost" : "Refresh needed",
       detail: surfaceError,
       tone: "bad",
       primaryLabel: backendStatus === "failed" ? "Retry launch" : "Refresh",
@@ -816,8 +988,8 @@ export function App() {
   if (blockedTurn) {
     actionNotices.push({
       id: `blocked-${blockedTurn.id}`,
-      title: "Execution is waiting on you",
-      detail: trimText(blockedTurn.response || "This request is ready to run when you enable changes."),
+      title: "Ready to run when you are",
+      detail: trimText(blockedTurn.response || "Turn on changes and send it again, or ask BOSS to plan it first."),
       tone: "warn",
       primaryLabel: "Enable changes",
       primaryAction: () => {
@@ -829,33 +1001,40 @@ export function App() {
   if (brain.pending_proposals > 0) {
     actionNotices.push({
       id: "brain-proposals",
-      title: "Internal proposals are waiting",
-      detail: `${brain.pending_proposals} project memory proposal(s) are waiting for review.`,
+      title: "A few project notes need review",
+      detail: `${brain.pending_proposals} saved note${brain.pending_proposals === 1 ? "" : "s"} are waiting in the details panel.`,
       tone: "warn",
-      primaryLabel: showDetails ? "Internal details open" : "Show internal details",
+      primaryLabel: "Open details",
       primaryAction: () => setShowDetails(true),
     });
   }
 
   if (backendStatus !== "ready") {
-    const startupTone: Tone = backendStatus === "failed" ? "bad" : "warn";
     return (
       <main className="startup-shell">
-        <section className="startup-card">
-          <p className="app-kicker">BOSS</p>
-          <h1>Starting your workspace</h1>
-          <p className="startup-copy">
-            BOSS is bringing the local backend online. Once it is ready, the main screen stays
-            focused on the conversation and keeps the system internals out of the way.
-          </p>
-          <div className={`status-chip tone-${startupTone}`}>
-            <span className="status-dot" />
-            <span>{backendMessage}</span>
+        <div className="hud-grid" />
+        <section className="startup-card hud-panel">
+          <div className="startup-copy-block">
+            <p className="section-eyebrow">BOSS</p>
+            <h1>Booting the console</h1>
+            <p className="supporting-copy">
+              BOSS is bringing the local runtime online. Once it is ready, the screen stays focused
+              on the thread, the live workstream, and the terminal trail.
+            </p>
+            <StatusPill tone={backendStatus === "failed" ? "bad" : "warn"}>{backendMessage}</StatusPill>
+            <div className="startup-actions">
+              <button type="button" className="primary-action" onClick={retryLaunch}>
+                Retry launch
+              </button>
+            </div>
           </div>
-          <div className="startup-actions">
-            <button type="button" className="primary-action" onClick={retryLaunch}>
-              Retry launch
-            </button>
+          <div className="signal-core signal-core-large">
+            <div className="signal-ring signal-ring-one" />
+            <div className="signal-ring signal-ring-two" />
+            <div className="signal-ring signal-ring-three" />
+            <div className="signal-center">
+              <span>{backendStatus === "failed" ? "OFFLINE" : "BOOT"}</span>
+            </div>
           </div>
         </section>
       </main>
@@ -864,97 +1043,132 @@ export function App() {
 
   return (
     <main className="workspace-shell">
-      <div className="app-backdrop" />
+      <div className="hud-grid" />
+      <div className="hud-noise" />
 
-      <header className="app-header">
-        <div className="app-brand">
-          <p className="app-kicker">BOSS</p>
-          <div>
-            <h1>Work with BOSS</h1>
-            <p>Ask for work, get a clear response, and keep the machinery in the background.</p>
-          </div>
-        </div>
-
-        <div className="header-controls">
-          <label className="project-picker">
-            <span>Project</span>
-            <select
-              value={activeProject ?? "__workspace__"}
-              onChange={(event) =>
-                void handleProjectSelect(
-                  event.target.value === "__workspace__" ? null : event.target.value,
-                )
-              }
-            >
-              <option value="__workspace__">Workspace</option>
-              {projects.map((project) => (
-                <option key={project.key} value={project.key}>
-                  {project.display_name || project.key}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <button type="button" className="ghost-action" onClick={() => void refreshAll()}>
-            {refreshing ? "Refreshing..." : "Refresh"}
-          </button>
-
-          <button
-            type="button"
-            className="ghost-action"
-            onClick={() => setShowDetails((current) => !current)}
-          >
-            {showDetails ? "Hide internal details" : "Show internal details"}
-          </button>
-        </div>
-      </header>
-
-      <div className="workspace-grid">
-        <section className="main-column">
-          <section className="panel focus-card">
-            <div className="focus-head">
-              <div>
-                <p className="section-eyebrow">Current focus</p>
-                <h2>{focusHeadline}</h2>
-              </div>
-              <span className={`health-pill tone-${healthTone(health.status || "unknown")}`}>
-                {formatStatus(health.status)}
-              </span>
+      <div className="workspace-frame">
+        <header className="command-bar hud-panel">
+          <div className="brand-lockup">
+            <p className="section-eyebrow">BOSS</p>
+            <div>
+              <h1>Adaptive coding console</h1>
+              <p>One thread, live work updates, terminal traces, and the rest tucked away.</p>
             </div>
+          </div>
 
+          <div className="command-bar-meta">
+            <StatusPill tone="good">Online</StatusPill>
+            <StatusPill tone={hasActiveWork ? "warn" : "neutral"}>{liveStatus.title}</StatusPill>
+          </div>
+
+          <div className="command-bar-controls">
+            <label className="project-picker">
+              <span>Project</span>
+              <select
+                value={activeProject ?? "__workspace__"}
+                onChange={(event) =>
+                  void handleProjectSelect(
+                    event.target.value === "__workspace__" ? null : event.target.value,
+                  )
+                }
+              >
+                <option value="__workspace__">Workspace</option>
+                {projects.map((project) => (
+                  <option key={project.key} value={project.key}>
+                    {project.display_name || project.key}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <button type="button" className="ghost-action" onClick={() => void refreshAll()}>
+              {refreshing ? "Refreshing..." : "Refresh"}
+            </button>
+
+            <button type="button" className="ghost-action" onClick={() => setShowDetails(true)}>
+              Details
+            </button>
+          </div>
+        </header>
+
+        <section className="hero-panel hud-panel">
+          <div className="hero-copy">
+            <p className="section-eyebrow">Current mission</p>
+            <h2>{focusHeadline}</h2>
             <p className="supporting-copy">{focusDescription}</p>
 
-            <div className="focus-meta">
-              <span>Project: {projectLabel(activeProject)}</span>
-              <span>Updated {formatTimestamp(workspace.updated_at)}</span>
+            <div className="hero-tags">
+              <StatusPill tone="neutral">Project · {projectLabel(activeProject)}</StatusPill>
+              <StatusPill tone={executeMode ? "warn" : "neutral"}>
+                {executeMode ? "Build mode" : "Chat mode"}
+              </StatusPill>
+              <StatusPill tone={statusTone(health.status)}>
+                {hasActiveWork ? liveStatus.detail : latestWorkSummary(runs, timeline)}
+              </StatusPill>
             </div>
 
-            <p className="focus-note">Now: {latestActivity}</p>
-          </section>
+            <p className="hero-footnote">
+              Root: {activeProjectMeta?.root || roots.primary_root || "Workspace root not loaded."}
+            </p>
+          </div>
 
-          {actionNotices.length ? (
-            <section className="action-stack">
-              <SectionHeader
-                eyebrow="Needs your input"
-                title="Action required"
-                detail={`${actionNotices.length} item${actionNotices.length === 1 ? "" : "s"}`}
-              />
-              <div className="action-notice-list">
-                {actionNotices.map((notice) => (
-                  <ActionNoticeCard key={notice.id} notice={notice} />
-                ))}
-              </div>
-            </section>
+          <div className="signal-core">
+            <div className="signal-ring signal-ring-one" />
+            <div className="signal-ring signal-ring-two" />
+            <div className="signal-ring signal-ring-three" />
+            <div className="signal-center">
+              <strong>{hasActiveWork ? "LIVE" : "READY"}</strong>
+              <span>{formatTimestamp(workspace.updated_at || brain.brain.updated_at)}</span>
+            </div>
+          </div>
+        </section>
+
+        {actionNotices.length ? (
+          <section className="notice-stack">
+            {actionNotices.map((notice) => (
+              <ActionNoticeCard key={notice.id} notice={notice} />
+            ))}
+          </section>
+        ) : null}
+
+        <section className="console-panel hud-panel">
+          <div className="console-head">
+            <div>
+              <p className="section-eyebrow">Thread</p>
+              <h3>Work with BOSS</h3>
+            </div>
+            <span className="section-detail">
+              {chatTurns.length ? `${chatTurns.length} turn${chatTurns.length === 1 ? "" : "s"}` : "Ready"}
+            </span>
+          </div>
+
+          {showLiveSurface ? (
+            <LiveSurface
+              liveStatus={liveStatus}
+              liveFeedItems={liveFeedItems}
+              terminalEntries={terminalEntries}
+              hasActiveWork={hasActiveWork}
+            />
           ) : null}
 
-          <section className="panel composer-card">
-            <SectionHeader
-              eyebrow="Ask"
-              title="What should BOSS do?"
-              detail={executeMode ? "Changes enabled" : "Plan only"}
-            />
+          <div ref={chatScrollRef} className="chat-scroll">
+            <div className="chat-feed">
+              {chatTurns.length ? (
+                chatTurns.map((turn) => (
+                  <ChatTurnCard
+                    key={`${turn.id}-${turnMode(turn)}`}
+                    turn={turn}
+                    backendUrl={backendUrl}
+                  />
+                ))
+              ) : (
+                <EmptyState message="Ask BOSS to build, fix, review, or summarize something." />
+              )}
+            </div>
+          </div>
 
-            <div className="quick-prompts">
+          <section className="composer-dock">
+            <div className="prompt-row">
               {QUICK_PROMPTS.map((prompt) => (
                 <button
                   key={prompt}
@@ -972,7 +1186,7 @@ export function App() {
               <textarea
                 value={composerValue}
                 onChange={(event) => setComposerValue(event.target.value)}
-                rows={5}
+                rows={4}
                 placeholder="Fix the checkout bug, audit the active project, summarize what changed, ..."
                 onKeyDown={(event) => {
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -984,14 +1198,26 @@ export function App() {
             </label>
 
             <div className="composer-footer">
-              <label className="simple-toggle">
-                <input
-                  type="checkbox"
-                  checked={executeMode}
-                  onChange={(event) => setExecuteMode(event.target.checked)}
-                />
-                <span>{executeMode ? "BOSS can make changes" : "Reply only"}</span>
-              </label>
+              <div className="mode-switch" role="tablist" aria-label="BOSS mode">
+                <button
+                  type="button"
+                  className={!executeMode ? "active" : ""}
+                  onClick={() => setExecuteMode(false)}
+                >
+                  Chat
+                </button>
+                <button
+                  type="button"
+                  className={executeMode ? "active" : ""}
+                  onClick={() => setExecuteMode(true)}
+                >
+                  Build
+                </button>
+              </div>
+
+              <p className="helper-copy">
+                {projectLabel(activeProject)} · Cmd/Ctrl+Enter to send
+              </p>
 
               <div className="action-group">
                 {streamingTurn?.pending ? (
@@ -1006,190 +1232,32 @@ export function App() {
                   disabled={sending || !composerValue.trim()}
                   onClick={() => void handleSubmit()}
                 >
-                  {sending ? "Working..." : executeMode ? "Start work" : "Ask BOSS"}
+                  {sending ? "Working..." : executeMode ? "Run request" : "Ask BOSS"}
                 </button>
               </div>
             </div>
-
-            <p className="helper-copy">Project: {projectLabel(activeProject)}. Press Cmd/Ctrl+Enter to send.</p>
           </section>
-
-          <section className="panel conversation-card">
-            <SectionHeader
-              eyebrow="Conversation"
-              title={chatTurns.length ? "Latest thread" : "Ready when you are"}
-              detail={chatTurns.length ? `${chatTurns.length} turns` : undefined}
-            />
-
-            <div className="chat-scroll">
-              <div className="chat-feed">
-                {chatTurns.length ? (
-                  chatTurns.map((turn) => (
-                    <ChatTurnCard
-                      key={`${turn.id}-${turnMode(turn)}`}
-                      turn={turn}
-                      backendUrl={backendUrl}
-                    />
-                  ))
-                ) : (
-                  <EmptyState message="Ask BOSS to build, fix, review, or summarize something." />
-                )}
-              </div>
-            </div>
-          </section>
-
-          {showDetails ? (
-            <section className="panel internal-card">
-              <SectionHeader
-                eyebrow="Internal"
-                title="System details"
-                detail="Hidden by default"
-              />
-
-              <div className="internal-grid">
-                <SummaryListCard
-                  eyebrow="Internal"
-                  title="Agent activity"
-                  items={agentActivityItems}
-                  empty="No active internal work right now."
-                />
-
-                <SummaryListCard
-                  eyebrow="Runs"
-                  title="Recent runs"
-                  items={runItems}
-                  empty="No runs recorded yet."
-                />
-
-                <SummaryListCard
-                  eyebrow="Workspace"
-                  title="Recent edits"
-                  items={recentEditItems}
-                  empty="No recent edits captured."
-                />
-
-                <SummaryListCard
-                  eyebrow="Workspace"
-                  title="Open files"
-                  items={openFileItems}
-                  empty="No open files captured."
-                />
-
-                <SummaryListCard
-                  eyebrow="Brain"
-                  title="Open problems"
-                  items={openProblemItems}
-                  empty="No open problems recorded."
-                />
-
-                <SummaryListCard
-                  eyebrow="Roots"
-                  title="Reachable filesystem scope"
-                  items={rootItems}
-                  empty="No workspace roots configured."
-                />
-
-                <FactCard
-                  eyebrow="Runtime"
-                  title="Health and access"
-                  facts={[
-                    { label: "Health", value: formatStatus(health.status) },
-                    { label: "Success rate", value: formatPercent(health.autonomous_success_rate) },
-                    { label: "Eval failures", value: formatCount(health.recent_eval_failures) },
-                    { label: "Watchers", value: health.workspace_watchers || "Unknown" },
-                    {
-                      label: "Web research",
-                      value: permissions.allow_web_research ? "Enabled" : "Off",
-                    },
-                    { label: "MCP", value: permissions.allow_mcp ? "Enabled" : "Off" },
-                  ]}
-                />
-
-                <FactCard
-                  eyebrow="Workspace"
-                  title="Recent machine state"
-                  facts={[
-                    {
-                      label: "Last terminal",
-                      value: workspace.last_terminal_command || "No terminal command captured.",
-                    },
-                    { label: "Last test result", value: workspaceTestSummary(workspace) },
-                    { label: "Git diff", value: workspace.last_git_diff || "No git diff captured." },
-                    {
-                      label: "Writable roots",
-                      value: permissions.writable_roots.join(", ") || "None configured",
-                    },
-                    {
-                      label: "Task runs",
-                      value: formatCount(metrics.task_runs_recorded),
-                    },
-                    {
-                      label: "Token usage",
-                      value: formatCount(metrics.token_usage?.total_tokens),
-                    },
-                  ]}
-                />
-              </div>
-
-              <div className="internal-actions">
-                <button type="button" className="ghost-action" onClick={openLegacyUi}>
-                  Open legacy web view
-                </button>
-              </div>
-            </section>
-          ) : null}
         </section>
-
-        <aside className="side-column">
-          <section className="panel side-card project-card">
-            <SectionHeader
-              eyebrow="Project"
-              title={projectLabel(activeProject)}
-              detail={activeProjectMeta?.source_root || "workspace"}
-            />
-
-            <p className="supporting-copy">
-              {activeProjectMeta?.root || roots.primary_root || "Working across the full workspace."}
-            </p>
-
-            <div className="project-highlights">
-              <div>
-                <span>Mission</span>
-                <strong>{brain.brain.mission || "No mission summary yet."}</strong>
-              </div>
-              <div>
-                <span>Next update</span>
-                <strong>{formatTimestamp(brain.brain.updated_at || workspace.updated_at)}</strong>
-              </div>
-            </div>
-          </section>
-
-          <SummaryListCard
-            eyebrow="Up next"
-            title="Suggested next steps"
-            items={suggestedItems}
-            empty="Ask BOSS for the next best move."
-          />
-
-          {watchItems.length ? (
-            <SummaryListCard
-              eyebrow="Watchouts"
-              title="Things to keep an eye on"
-              items={watchItems}
-              empty="No blockers reported."
-            />
-          ) : null}
-
-          {recentWorkItems.length ? (
-            <SummaryListCard
-              eyebrow="Recent"
-              title="Recent outcomes"
-              items={recentWorkItems}
-              empty="No active work right now."
-            />
-          ) : null}
-        </aside>
       </div>
+
+      {showDetails ? (
+        <DetailsDrawer
+          onClose={() => setShowDetails(false)}
+          onOpenLegacyUi={openLegacyUi}
+          suggestedItems={suggestedItems}
+          watchItems={watchItems}
+          recentOutcomeItems={recentOutcomeItems}
+          rawActivityItems={rawActivityItems}
+          runItems={runItems}
+          recentEditItems={recentEditItems}
+          openFileItems={openFileItems}
+          rootItems={rootItems}
+          health={health}
+          permissions={permissions}
+          metrics={metrics}
+          workspace={workspace}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1199,10 +1267,79 @@ function SectionHeader(props: { eyebrow: string; title: string; detail?: string 
     <div className="section-header">
       <div>
         <p className="section-eyebrow">{props.eyebrow}</p>
-        <h3>{props.title}</h3>
+        <h4>{props.title}</h4>
       </div>
       {props.detail ? <span className="section-detail">{props.detail}</span> : null}
     </div>
+  );
+}
+
+function StatusPill(props: { tone: Tone; children: string }) {
+  return <span className={`status-pill tone-${props.tone}`}>{props.children}</span>;
+}
+
+function LiveSurface(props: {
+  liveStatus: LiveFeedItem;
+  liveFeedItems: LiveFeedItem[];
+  terminalEntries: TerminalCommandRecord[];
+  hasActiveWork: boolean;
+}) {
+  return (
+    <section className="live-surface">
+      <article className="live-panel">
+        <SectionHeader
+          eyebrow="Live"
+          title={props.liveStatus.title}
+          detail={props.hasActiveWork ? "Updating automatically" : "Recent work"}
+        />
+        <p className="live-status-copy">{props.liveStatus.detail}</p>
+
+        <div className="live-feed-list">
+          {props.liveFeedItems.length ? (
+            props.liveFeedItems.map((item) => (
+              <article key={item.id} className={`live-feed-item tone-${item.tone}`}>
+                <div className="live-feed-head">
+                  <strong>{item.title}</strong>
+                  {item.meta ? <span>{item.meta}</span> : null}
+                </div>
+                <p>{item.detail}</p>
+              </article>
+            ))
+          ) : (
+            <EmptyState message="Live progress updates will appear here while BOSS is working." />
+          )}
+        </div>
+      </article>
+
+      <article className="terminal-panel">
+        <SectionHeader
+          eyebrow="Terminal"
+          title={props.terminalEntries.length ? "Recent command trail" : "Waiting for command output"}
+          detail={props.terminalEntries.length ? `${props.terminalEntries.length} command${props.terminalEntries.length === 1 ? "" : "s"}` : undefined}
+        />
+        <div className="terminal-list">
+          {props.terminalEntries.length ? (
+            props.terminalEntries.map((entry, index) => <TerminalCard key={`${entry.timestamp || index}-${entry.command || "cmd"}`} entry={entry} />)
+          ) : (
+            <EmptyState message="When BOSS touches the terminal, the command and output will appear here." />
+          )}
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function TerminalCard(props: { entry: TerminalCommandRecord }) {
+  const output = trimBlock(props.entry.stdout || props.entry.stderr || "");
+  return (
+    <article className={`terminal-card tone-${terminalTone(props.entry)}`}>
+      <div className="terminal-head">
+        <strong>{props.entry.command || "Command"}</strong>
+        <span>{typeof props.entry.exit_code === "number" ? `Exit ${props.entry.exit_code}` : "Running"}</span>
+      </div>
+      {props.entry.workdir ? <p className="terminal-workdir">{props.entry.workdir}</p> : null}
+      {output ? <pre className="terminal-output">{output}</pre> : <p className="terminal-empty">No captured output.</p>}
+    </article>
   );
 }
 
@@ -1274,7 +1411,7 @@ function ListRow(props: {
 function ChatTurnCard(props: { turn: ChatTurn; backendUrl: string }) {
   const mode = turnMode(props.turn);
   const pending = "pending" in props.turn && props.turn.pending;
-  const statusText = pending ? "Working" : formatStatus(mode);
+  const statusText = pending ? "Live" : mode === "executed" ? "Done" : formatStatus(mode);
   const result = turnResult(props.turn);
 
   return (
@@ -1289,7 +1426,7 @@ function ChatTurnCard(props: { turn: ChatTurn; backendUrl: string }) {
           <span className="bubble-label">BOSS</span>
           <span className="bubble-status">{statusText}</span>
         </div>
-        <p>{props.turn.response || (pending ? "Thinking..." : "No response text.")}</p>
+        <p>{props.turn.response || (pending ? "Working through it…" : "No response text.")}</p>
         {hasBuildRunDetails(result) ? (
           <InternalRunCard backendUrl={props.backendUrl} result={result} />
         ) : null}
@@ -1372,11 +1509,11 @@ function InternalRunCard(props: {
     <section className="run-summary-card">
       <div className="run-summary-head">
         <div>
-          <span className="bubble-status">Internal run</span>
-          <strong>{summary.goal || "Build run"}</strong>
+          <span className="bubble-status">Work summary</span>
+          <strong>{summary.goal || "Execution run"}</strong>
         </div>
         <button type="button" className="detail-toggle" onClick={() => void toggleExpanded()}>
-          {expanded ? "Hide details" : "Show details"}
+          {expanded ? "Hide worklog" : "Show worklog"}
         </button>
       </div>
 
@@ -1390,12 +1527,12 @@ function InternalRunCard(props: {
 
       {expanded ? (
         <div className="run-detail-shell">
-          {loading ? <p className="run-detail-note">Loading internal run details…</p> : null}
+          {loading ? <p className="run-detail-note">Loading worklog…</p> : null}
           {error ? <p className="run-detail-note tone-bad">{error}</p> : null}
 
           {!loading && !error && planSteps.length ? (
             <div className="run-detail-block">
-              <span className="run-detail-label">Architect plan</span>
+              <span className="run-detail-label">Planned steps</span>
               <ol className="run-plan-list">
                 {planSteps.map((step, index) => (
                   <li key={`${index}-${step}`}>{step}</li>
@@ -1406,12 +1543,12 @@ function InternalRunCard(props: {
 
           {!loading && !error && steps.length ? (
             <div className="run-detail-block">
-              <span className="run-detail-label">Child runs</span>
+              <span className="run-detail-label">Execution log</span>
               <div className="run-step-list">
                 {steps.map((step) => (
                   <article
                     key={`${step.step_index ?? "step"}-${step.title || "untitled"}`}
-                    className={`run-step-card tone-${runTone(step.status)}`}
+                    className={`run-step-card tone-${statusTone(step.status)}`}
                   >
                     <div className="run-step-head">
                       <strong>{step.title || "Untitled step"}</strong>
@@ -1419,7 +1556,6 @@ function InternalRunCard(props: {
                     </div>
 
                     <div className="run-step-meta">
-                      <span>Engineer</span>
                       <span>Attempt {step.iterations || 0}</span>
                       <span>{formatFileSummary(step.files_changed, 2)}</span>
                     </div>
@@ -1427,7 +1563,7 @@ function InternalRunCard(props: {
                     <p className="run-step-copy">{testOutputSummary(step)}</p>
 
                     {trimText(step.audit_output) ? (
-                      <p className="run-step-copy">Auditor: {trimText(step.audit_output)}</p>
+                      <p className="run-step-copy">Review: {trimText(step.audit_output)}</p>
                     ) : null}
 
                     {step.errors?.length ? (
@@ -1440,11 +1576,150 @@ function InternalRunCard(props: {
           ) : null}
 
           {!loading && !error && !planSteps.length && !steps.length ? (
-            <p className="run-detail-note">No additional internal detail was recorded for this run.</p>
+            <p className="run-detail-note">No additional worklog was recorded for this run.</p>
           ) : null}
         </div>
       ) : null}
     </section>
+  );
+}
+
+function DetailsDrawer(props: {
+  onClose: () => void;
+  onOpenLegacyUi: () => void;
+  suggestedItems: SummaryListItem[];
+  watchItems: SummaryListItem[];
+  recentOutcomeItems: SummaryListItem[];
+  rawActivityItems: SummaryListItem[];
+  runItems: SummaryListItem[];
+  recentEditItems: SummaryListItem[];
+  openFileItems: SummaryListItem[];
+  rootItems: SummaryListItem[];
+  health: HealthSnapshot;
+  permissions: PermissionSnapshot;
+  metrics: MetricSnapshot;
+  workspace: WorkspaceSnapshot;
+}) {
+  return (
+    <>
+      <button type="button" className="drawer-backdrop" aria-label="Close details" onClick={props.onClose} />
+      <aside className="details-drawer hud-panel">
+        <div className="drawer-head">
+          <div>
+            <p className="section-eyebrow">Details</p>
+            <h3>Project and runtime details</h3>
+          </div>
+          <button type="button" className="ghost-action" onClick={props.onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="drawer-scroll">
+          <SummaryListCard
+            eyebrow="Up next"
+            title="Suggested next steps"
+            items={props.suggestedItems}
+            empty="Ask BOSS for the next best move."
+          />
+
+          <SummaryListCard
+            eyebrow="Watchouts"
+            title="Things to keep an eye on"
+            items={props.watchItems}
+            empty="No blockers recorded."
+          />
+
+          <SummaryListCard
+            eyebrow="Recent"
+            title="Recent outcomes"
+            items={props.recentOutcomeItems}
+            empty="No recent outcomes recorded."
+          />
+
+          <SummaryListCard
+            eyebrow="Internal"
+            title="Raw agent activity"
+            items={props.rawActivityItems}
+            empty="No raw agent activity recorded."
+          />
+
+          <SummaryListCard
+            eyebrow="Runs"
+            title="Recent runs"
+            items={props.runItems}
+            empty="No runs recorded."
+          />
+
+          <SummaryListCard
+            eyebrow="Workspace"
+            title="Recent edits"
+            items={props.recentEditItems}
+            empty="No recent edits captured."
+          />
+
+          <SummaryListCard
+            eyebrow="Workspace"
+            title="Open files"
+            items={props.openFileItems}
+            empty="No open files captured."
+          />
+
+          <SummaryListCard
+            eyebrow="Roots"
+            title="Reachable filesystem scope"
+            items={props.rootItems}
+            empty="No workspace roots configured."
+          />
+
+          <FactCard
+            eyebrow="Runtime"
+            title="Health and access"
+            facts={[
+              { label: "Health", value: formatStatus(props.health.status) },
+              { label: "Success rate", value: formatPercent(props.health.autonomous_success_rate) },
+              { label: "Eval failures", value: formatCount(props.health.recent_eval_failures) },
+              { label: "Watchers", value: props.health.workspace_watchers || "Unknown" },
+              {
+                label: "Web research",
+                value: props.permissions.allow_web_research ? "Enabled" : "Off",
+              },
+              { label: "MCP", value: props.permissions.allow_mcp ? "Enabled" : "Off" },
+            ]}
+          />
+
+          <FactCard
+            eyebrow="Workspace"
+            title="Machine state"
+            facts={[
+              {
+                label: "Last terminal",
+                value: props.workspace.last_terminal_command || "No terminal command captured.",
+              },
+              { label: "Last test result", value: workspaceTestSummary(props.workspace) },
+              { label: "Git diff", value: props.workspace.last_git_diff || "No git diff captured." },
+              {
+                label: "Writable roots",
+                value: props.permissions.writable_roots.join(", ") || "None configured",
+              },
+              {
+                label: "Task runs",
+                value: formatCount(props.metrics.task_runs_recorded),
+              },
+              {
+                label: "Token usage",
+                value: formatCount(props.metrics.token_usage?.total_tokens),
+              },
+            ]}
+          />
+        </div>
+
+        <div className="drawer-footer">
+          <button type="button" className="ghost-action" onClick={props.onOpenLegacyUi}>
+            Open legacy web view
+          </button>
+        </div>
+      </aside>
+    </>
   );
 }
 

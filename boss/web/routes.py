@@ -177,6 +177,46 @@ def create_routes(orchestrator, swarm_manager) -> APIRouter:
             )
         }
 
+    @router.get("/command-center")
+    def command_center(
+        project_name: Optional[str] = None,
+        include_internal: bool = False,
+        limit: int = 40,
+    ) -> dict[str, Any]:
+        workspace = orchestrator.workspace_snapshot(project_name=project_name)
+        roots = orchestrator.workspace_roots_snapshot(include_internal=include_internal)
+        active_project = workspace.get("active_project")
+        if active_project == "__workspace__":
+            active_project = None
+        return {
+            "projects": {
+                "active_project": active_project,
+                "project_catalog": _serialize(roots.get("projects", [])),
+            },
+            "brain": _serialize(orchestrator.command_center_brain(project_name=project_name)),
+            "next": {
+                "recommendations": _serialize(
+                    orchestrator.next_recommendations(project_name=project_name, limit=5)
+                )
+            },
+            "risks": {
+                "risks": _serialize(orchestrator.project_risks(project_name=project_name, limit=8))
+            },
+            "workspace": _serialize(workspace),
+            "activity": {"activities": _serialize(orchestrator.agent_activity_snapshot())},
+            "timeline": {"events": _serialize(orchestrator.timeline_snapshot(limit=80))},
+            "health": _serialize(orchestrator.health_snapshot(project_name=project_name)),
+            "metrics": _serialize(orchestrator.metrics_snapshot(project_name=project_name)),
+            "permissions": _serialize(orchestrator.permissions_snapshot()),
+            "runs": {"runs": _serialize(orchestrator.recent_runs(project_name=project_name, limit=20))},
+            "history": {
+                "history": _serialize(
+                    orchestrator.conversation_history_snapshot(project_name=project_name, limit=limit)
+                )
+            },
+            "roots": _serialize(roots),
+        }
+
     @router.post("/chat")
     def chat(body: dict[str, Any]) -> dict[str, Any]:
         message = str(body.get("message", "")).strip()

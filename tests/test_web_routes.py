@@ -85,9 +85,10 @@ class _FakeOrchestrator:
             "active_project": project_name or self.active_project,
             "open_files": ["auth.py"],
             "recent_edits": [{"file": "auth.py", "type": "edit", "summary": "Changed auth"}],
-            "recent_terminal_commands": [{"command": "pytest", "exit_code": 1}],
+            "recent_events": [{"type": "terminal_command", "command": "pytest", "timestamp": "now"}],
+            "recent_terminal_commands": [{"command": "pytest", "exit_code": 1, "stdout": "tests failed"}],
             "last_terminal_command": "pytest",
-            "last_terminal_result": {"command": "pytest", "exit_code": 1},
+            "last_terminal_result": {"command": "pytest", "exit_code": 1, "stdout": "tests failed"},
             "last_test_results": {"passed": False, "failure_summary": "test_auth failed"},
             "last_git_diff": "auth.py | 4 ++--",
             "last_git_status": {"summary": " M auth.py", "dirty": True},
@@ -465,6 +466,21 @@ def test_command_center_brain_and_strategy_routes():
     assert roadmap.json()["focus"] == "Reliability hardening"
     assert risks.status_code == 200
     assert risks.json()["risks"][0]["severity"] == "HIGH"
+
+
+def test_command_center_route_returns_bundled_snapshot():
+    app = FastAPI()
+    app.include_router(create_routes(_FakeOrchestrator(), _FakeSwarmManager()))
+    client = TestClient(app)
+
+    response = client.get("/command-center")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["projects"]["active_project"] == "legion"
+    assert payload["brain"]["brain"]["current_focus"] == "Reliability hardening"
+    assert payload["workspace"]["recent_terminal_commands"][0]["command"] == "pytest"
+    assert payload["history"]["history"][0]["message"] == "hello"
 
 
 def test_chat_stream_route_returns_ndjson_events():

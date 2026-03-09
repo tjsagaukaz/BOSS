@@ -133,8 +133,8 @@ class WorkspaceStateStore:
             "workdir": workdir,
             "exit_code": result.get("exit_code"),
             "timestamp": utc_now_iso(),
-            "stdout": str(result.get("stdout", ""))[:400],
-            "stderr": str(result.get("stderr", ""))[:400],
+            "stdout": str(result.get("stdout", ""))[:1200],
+            "stderr": str(result.get("stderr", ""))[:1200],
         }
         state["last_terminal_command"] = command
         state["last_terminal_result"] = payload

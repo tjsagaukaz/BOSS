@@ -68,13 +68,37 @@ export interface WorkspaceEdit {
   type?: string;
 }
 
+export interface WorkspaceEventRecord {
+  type?: string;
+  file?: string;
+  path?: string;
+  command?: string;
+  change_type?: string;
+  summary?: string;
+  timestamp?: string;
+  exit_code?: number | null;
+}
+
+export interface TerminalCommandRecord {
+  command?: string;
+  workdir?: string;
+  exit_code?: number | null;
+  stdout?: string;
+  stderr?: string;
+  timestamp?: string;
+}
+
 export interface WorkspaceSnapshot {
   active_project: string;
+  scope?: string;
+  workspace_root?: string;
+  search_roots?: string[];
   open_files: string[];
   recent_edits: WorkspaceEdit[];
-  recent_terminal_commands: Array<Record<string, unknown>>;
+  recent_events?: WorkspaceEventRecord[];
+  recent_terminal_commands: TerminalCommandRecord[];
   last_terminal_command: string;
-  last_terminal_result: Record<string, unknown>;
+  last_terminal_result: TerminalCommandRecord;
   last_test_results: Record<string, unknown>;
   last_git_diff: string;
   last_git_status: Record<string, unknown>;
@@ -88,6 +112,8 @@ export interface ActivityItem {
   status?: string;
   message?: string;
   project_name?: string;
+  task_id?: number;
+  metadata?: Record<string, unknown>;
   updated_at?: string;
 }
 
@@ -101,8 +127,10 @@ export interface TimelineEvent {
   status?: string;
   agent?: string;
   project_name?: string;
+  task_id?: number;
   message?: string;
   timestamp?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface TimelineSnapshot {

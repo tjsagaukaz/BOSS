@@ -1,21 +1,8 @@
 import type {
   ChatRequest,
-  RunDetailsResponse,
   CommandCenterSnapshot,
-  NextSnapshot,
-  ProjectsResponse,
-  RisksSnapshot,
-  RootSnapshot,
-  RunsSnapshot,
+  RunDetailsResponse,
   StreamEvent,
-  WorkspaceSnapshot,
-  ActivitySnapshot,
-  TimelineSnapshot,
-  ChatHistorySnapshot,
-  BrainSnapshot,
-  HealthSnapshot,
-  MetricSnapshot,
-  PermissionSnapshot,
 } from "./types";
 
 function endpoint(baseUrl: string, path: string): string {
@@ -51,57 +38,7 @@ export async function setActiveProject(baseUrl: string, projectName: string): Pr
 }
 
 export async function loadCommandCenter(baseUrl: string): Promise<CommandCenterSnapshot> {
-  const [
-    brain,
-    next,
-    risks,
-    workspace,
-    activity,
-    timeline,
-    health,
-    metrics,
-    permissions,
-    runs,
-    history,
-    roots,
-  ] = await Promise.all([
-    request<BrainSnapshot>(baseUrl, "/brain"),
-    request<NextSnapshot>(baseUrl, "/next"),
-    request<RisksSnapshot>(baseUrl, "/risks"),
-    request<WorkspaceSnapshot>(baseUrl, "/workspace"),
-    request<ActivitySnapshot>(baseUrl, "/activity"),
-    request<TimelineSnapshot>(baseUrl, "/timeline"),
-    request<HealthSnapshot>(baseUrl, "/health"),
-    request<MetricSnapshot>(baseUrl, "/metrics"),
-    request<PermissionSnapshot>(baseUrl, "/permissions"),
-    request<RunsSnapshot>(baseUrl, "/runs"),
-    request<ChatHistorySnapshot>(baseUrl, "/chat/history"),
-    request<RootSnapshot>(baseUrl, "/roots"),
-  ]);
-
-  const projects: ProjectsResponse = {
-    active_project:
-      workspace.active_project && workspace.active_project !== "__workspace__"
-        ? workspace.active_project
-        : null,
-    project_catalog: roots.projects ?? [],
-  };
-
-  return {
-    projects,
-    brain,
-    next,
-    risks,
-    workspace,
-    activity,
-    timeline,
-    health,
-    metrics,
-    permissions,
-    runs,
-    history,
-    roots,
-  };
+  return request<CommandCenterSnapshot>(baseUrl, "/command-center");
 }
 
 export function fetchRunDetails(
