@@ -1079,7 +1079,7 @@ function renderChat() {
       const thinkingLabel = turn.cancelling ? "Stopping" : isReplying ? "Replying" : "Thinking";
       return `
         <article class="chat-turn message-fade-in">
-          <p class="chat-label text-emerald-200">TJ</p>
+          <p class="chat-label text-emerald-200">You</p>
           <div class="chat-body chat-user">${formatMultiline(turn.message)}</div>
         </article>
         <article class="chat-turn message-fade-in">

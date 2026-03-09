@@ -64,6 +64,7 @@ class ContextEnvelopeBuilder:
         lines = [
             f"Role: {role}",
             f"Project: {project_context.name}",
+            f"User Request: {task.strip() or 'None'}",
             f"Goal: {goal}",
         ]
 
@@ -155,7 +156,7 @@ class ContextEnvelopeBuilder:
             "test": "Prioritize deterministic tests and direct coverage of the requested behavior.",
             "security": "Assume hostile input. Prioritize auth, secrets, validation, and trust-boundary issues.",
             "documentation": "Document actual behavior only. Do not describe unimplemented features as complete.",
-            "conversation": "Answer naturally as TJ's trusted partner. Distinguish discussion from execution and suggest the next concrete BOSS action when useful.",
+            "conversation": "Answer naturally as a grounded engineering partner. Distinguish discussion from execution and suggest the next concrete action when useful.",
         }
         if role in role_specific:
             rules.append(role_specific[role])

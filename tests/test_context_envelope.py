@@ -166,6 +166,7 @@ def test_context_envelope_uses_fixed_section_order():
     ]
     positions = [envelope.index(header) for header in expected_headers]
     assert positions == sorted(positions)
+    assert "User Request: Add auth middleware" in envelope
     assert "Allowed Paths: auth.py" in envelope
     assert "Current Focus: Reliability hardening" in envelope
     assert "Brain Rules:\n- Never use Flask for new APIs." in envelope

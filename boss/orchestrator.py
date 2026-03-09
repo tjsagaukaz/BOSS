@@ -1699,7 +1699,7 @@ class BOSSOrchestrator:
             "project_name": "__workspace__",
             "brain": ProjectBrain(
                 project_name="__workspace__",
-                mission="Run TJ's engineering portfolio like an operating system.",
+                mission="Run the active engineering portfolio with clear workspace awareness.",
                 current_focus=focuses[0] if focuses else "Workspace operator mode",
                 architecture=[
                     "Workspace-first search and navigation",
@@ -1707,8 +1707,8 @@ class BOSSOrchestrator:
                     "Research, benchmarks, and observability",
                 ],
                 brain_rules=[
-                    "Prefer workspace-first discovery before asking TJ to restate context.",
-                    "Keep destructive actions on confirm unless TJ explicitly asks otherwise.",
+                    "Prefer workspace-first discovery before asking the user to restate context.",
+                    "Keep destructive actions on confirm unless the user explicitly asks otherwise.",
                     "Use the fastest high-signal path to an answer, then suggest the next move.",
                 ],
                 milestones=["Native app", "Workspace awareness", "Deterministic evaluation", "Observability surface"],
@@ -1819,7 +1819,7 @@ class BOSSOrchestrator:
             projects = portfolio.get("projects", [])
             return {
                 "project_name": "__workspace__",
-                "mission": "Coordinate TJ's active engineering portfolio.",
+                "mission": "Coordinate the active engineering portfolio.",
                 "focus": "Workspace operator mode",
                 "completed": ["Native app", "Workspace awareness", "Observability surface"],
                 "in_progress": [str(item.get("display_name", "")) for item in projects[:3]],
@@ -2661,7 +2661,7 @@ class BOSSOrchestrator:
                 mission="General workspace mode",
                 current_focus="Ad hoc local assistance",
                 brain_rules=[
-                    "Prefer broad search and direct inspection before asking TJ to restate context.",
+                    "Prefer broad search and direct inspection before asking the user to restate context.",
                     "Treat destructive actions as confirm-only.",
                 ],
             ),

@@ -78,9 +78,15 @@ class _FakeModelClient:
     model = "gpt-5.4"
 
     def generate(self, prompt: str, system_prompt: str = "", tools=None, stream: bool = False, on_text_delta=None):
-        text = "Here is the current architecture and the next safe action."
+        lowered = prompt.lower()
+        if "hey boss" in lowered or "hello boss" in lowered or "good morning boss" in lowered:
+            text = "Hey. What do you want to work on?"
+        elif "thanks" in lowered or "thank you" in lowered:
+            text = "You're welcome."
+        else:
+            text = "Here is the current architecture and the next safe action."
         if stream and on_text_delta:
-            for chunk in ("Here is ", "the current architecture ", "and the next safe action."):
+            for chunk in (text,):
                 time.sleep(0.01)
                 on_text_delta(chunk)
         return ModelRunResult(
@@ -334,7 +340,7 @@ def test_conversation_router_supports_benchmark_intent(tmp_path):
 
     assert response["intent"] == "benchmark"
     assert response["mode"] == "executed"
-    assert "benchmark signal" in response["reply"].lower()
+    assert "benchmark" in response["reply"].lower()
 
 
 def test_conversation_router_supports_autobuild_alias(tmp_path):
@@ -369,8 +375,8 @@ def test_conversation_router_supports_loop_status(tmp_path):
 
     assert response["intent"] == "loop_status"
     assert response["mode"] == "executed"
-    assert "autonomous loop" in response["reply"].lower()
-    assert "loop #7" in response["reply"].lower()
+    assert "current build run" in response["reply"].lower()
+    assert "run #7" in response["reply"].lower()
 
 
 def test_conversation_router_supports_stop_command(tmp_path):
@@ -452,17 +458,19 @@ def test_conversation_router_records_project_brain_signal(tmp_path):
     assert orchestrator.project_brain_signals == [("we are focusing on reliability hardening right now", "legion")]
 
 
-def test_conversation_router_short_circuits_small_talk(tmp_path):
+def test_conversation_router_routes_small_talk_through_the_model(tmp_path):
     orchestrator = _FakeOrchestrator()
     history_store = ConversationHistoryStore(tmp_path / "boss.db")
-    router = ConversationRouter(orchestrator, history_store, _FakeRouter(), tmp_path)
+    model_router = _FakeRouter()
+    router = ConversationRouter(orchestrator, history_store, model_router, tmp_path)
 
     response = router.handle_message("hey boss")
 
     assert response["intent"] == "conversation"
     assert response["mode"] == "chat"
-    assert response["reply"] == "Hey."
+    assert response["reply"] == "Hey. What do you want to work on?"
     assert orchestrator.project_brain_signals == []
+    assert model_router.records[-1]["success"] is True
 
 
 def test_conversation_router_executes_research_intent(tmp_path):
@@ -490,7 +498,7 @@ def test_conversation_router_stream_small_talk_yields_short_reply(tmp_path):
     assert events[0]["mode"] == "chat"
     deltas = [event["delta"] for event in events if event["type"] == "delta"]
     assert len(deltas) == 1
-    assert "hey" in deltas[0].lower()
+    assert deltas[0] == "Hey. What do you want to work on?"
     assert events[-1]["type"] == "done"
     assert orchestrator.project_brain_signals == []
 
@@ -503,6 +511,34 @@ def test_persona_prompt_is_not_founder_roleplay(tmp_path):
 
     assert "co-ceo" not in persona_prompt.lower()
     assert "plain language" in persona_prompt.lower()
+    assert "do not force a name" in persona_prompt.lower()
+
+
+def test_persona_prompt_includes_configured_preferences(tmp_path):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "persona.yaml").write_text(
+        "\n".join(
+            [
+                "assistant_name: BOSS",
+                "relationship: engineering partner",
+                "working_style:",
+                "  - Move directly into execution when intent is clear.",
+                "communication_preferences:",
+                "  - Skip hype and get to the point.",
+                "user_preferences:",
+                "  - Prefer concise updates during implementation.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    history_store = ConversationHistoryStore(tmp_path / "boss.db")
+    router = ConversationRouter(_FakeOrchestrator(), history_store, _FakeRouter(), tmp_path)
+
+    persona_prompt = router._persona_system_prompt()
+
+    assert "move directly into execution" in persona_prompt.lower()
+    assert "skip hype and get to the point" in persona_prompt.lower()
+    assert "prefer concise updates during implementation" in persona_prompt.lower()
 
 
 def test_conversation_router_can_cancel_stream(tmp_path):
@@ -528,5 +564,5 @@ def test_conversation_router_can_report_visible_projects(tmp_path):
 
     assert response["intent"] == "projects"
     assert response["mode"] == "executed"
-    assert "BOSS" in response["reply"]
+    assert "Visible projects" in response["reply"]
     assert "Legion" in response["reply"]

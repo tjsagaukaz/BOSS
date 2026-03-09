@@ -85,20 +85,32 @@ class ConversationRouter:
     )
     DEFAULT_PERSONA = {
         "assistant_name": "BOSS",
-        "user_name": "TJ",
-        "relationship": "technical operator and engineering partner",
+        "user_name": "",
+        "relationship": "engineering partner",
         "tone": ["direct", "practical", "calm", "technically sharp"],
         "defaults": {
-            "address_user_as": "occasional",
-            "emoji_style": "minimal",
+            "address_user_as": "only when helpful",
             "reply_style": "concise",
+            "learn_from_history": True,
         },
+        "working_style": [
+            "Default to the smallest useful next action.",
+            "Keep planning proportional to task risk.",
+            "Treat clear requests as operational, not ceremonial.",
+        ],
+        "communication_preferences": [
+            "Use plain language.",
+            "Avoid hype, roleplay, and branded catchphrases.",
+            "Keep replies concise unless more depth is useful.",
+        ],
+        "user_preferences": [],
         "rules": [
             "Answer directly and keep the reply grounded in the available project context.",
             "Prefer practical next steps over abstract brainstorming.",
             "Use plain language instead of internal system jargon.",
             "Keep default replies concise unless the user asks for depth.",
             "If something is blocked, explain it plainly and give the fastest next step.",
+            "Adapt to the user's working style from recent history and configured preferences without making a show of it.",
         ],
         "banned_phrases": [
             "I am here in workspace mode",
@@ -144,22 +156,10 @@ class ConversationRouter:
             raise ValueError("Message is required.")
 
         active_project = project_name or self.orchestrator.get_active_project_name()
-        stream_scope = active_project or "__workspace__"
-        if self._is_small_talk(cleaned):
-            response = {
-                "intent": "conversation",
-                "conversation_type": "discussion",
-                "mode": "chat",
-                "project_name": active_project,
-                "reply": self._small_talk_reply(cleaned, active_project),
-                "actions": [],
-                "result": None,
-            }
-            self._record_history(active_project, cleaned, response)
-            return response
+        is_small_talk = self._is_small_talk(cleaned)
 
         detected = self._detect_intent(cleaned, intent_override=intent_override, project_name_hint=active_project)
-        if active_project:
+        if active_project and not is_small_talk:
             self.orchestrator.note_project_brain_signal(cleaned, project_name=active_project)
         history = self.history_store.recent(project_name=active_project, limit=8)
         implicit_execute = bool(detected.get("explicit_command"))
@@ -268,24 +268,9 @@ class ConversationRouter:
             raise ValueError("Message is required.")
 
         active_project = project_name or self.orchestrator.get_active_project_name()
-        if self._is_small_talk(cleaned):
-            response = {
-                "intent": "conversation",
-                "conversation_type": "discussion",
-                "mode": "chat",
-                "project_name": active_project,
-                "reply": self._small_talk_reply(cleaned, active_project),
-                "actions": [],
-                "result": None,
-            }
-            self._record_history(active_project, cleaned, response)
-            yield self._stream_meta_event(response)
-            yield {"type": "delta", "delta": response["reply"]}
-            yield {"type": "done", "response": response}
-            return
-
+        is_small_talk = self._is_small_talk(cleaned)
         detected = self._detect_intent(cleaned, intent_override=intent_override, project_name_hint=active_project)
-        if active_project:
+        if active_project and not is_small_talk:
             self.orchestrator.note_project_brain_signal(cleaned, project_name=active_project)
         implicit_execute = bool(detected.get("explicit_command"))
         should_execute = execute or implicit_execute or self._should_auto_execute(detected, cleaned, auto_approve=auto_approve)
@@ -662,9 +647,13 @@ class ConversationRouter:
             return self._fallback_reply(message, project_name, suggested_task)
 
     def _fallback_reply(self, message: str, project_name: str | None, suggested_task: str | None) -> str:
+        if self._is_small_talk(message):
+            return self._small_talk_reply(message, project_name)
         if suggested_task:
-            return "I can take that on. If you want, I can plan it first or just run it."
-        return "I’m with you."
+            return "I can do that. I can plan it first or start implementing."
+        if project_name:
+            return f"I’m here. Tell me what you want to do in {project_name}."
+        return "I’m here. Tell me what you want to work on."
 
     def _is_small_talk(self, message: str) -> bool:
         text = message.strip()
@@ -677,7 +666,7 @@ class ConversationRouter:
     def _small_talk_reply(self, message: str, project_name: str | None) -> str:
         lowered = message.strip().lower()
         if "thank" in lowered:
-            return "Anytime."
+            return "You're welcome."
         return "Hey."
 
     def _project_context(self, project_name: str | None, task_hint: str) -> ProjectContext:
@@ -721,9 +710,9 @@ class ConversationRouter:
             return f"{persona_block}\n\n{prompt}".strip()
         return (
             f"{persona_block}\n\n"
-            "You are BOSS, a local AI engineering operating system. "
-            "Respond conversationally, stay grounded in the provided context, "
-            "and suggest the next concrete action when the user sounds task-oriented."
+            "You are BOSS, a local engineering assistant. "
+            "Respond naturally, stay grounded in the provided context, "
+            "and suggest the next concrete action when it is useful."
         )
 
     def _suggest_execution_reply(self, detected: dict[str, Any], project_name: str | None) -> str:
@@ -1011,8 +1000,8 @@ class ConversationRouter:
     def _format_portfolio(self, snapshot: dict[str, Any]) -> str:
         projects = snapshot.get("projects", []) or []
         if not projects:
-            return "TJ, I’m not seeing any registered projects yet. Add roots and I’ll map them for you 👀"
-        lines = [f"TJ, here’s what I can currently see across your Mac 👇", ""]
+            return "No registered projects yet. Add a workspace root and I’ll map it."
+        lines = ["Visible projects:", ""]
         for project in projects[:12]:
             display = project.get("display_name") or project.get("project_key") or "Unknown"
             focus = project.get("focus") or "No focus set yet"
@@ -1025,12 +1014,12 @@ class ConversationRouter:
     def _format_permissions(self, snapshot: dict[str, Any]) -> str:
         writable = ", ".join(snapshot.get("writable_roots", [])[:5]) or "None"
         return (
-            "TJ, here’s my current operator profile 🔐\n\n"
+            "Current access profile.\n\n"
             f"- Workspace write mode: {snapshot.get('workspace_write_mode', 'unknown')}\n"
             f"- Project write mode: {snapshot.get('project_write_mode', 'unknown')}\n"
             f"- Destructive actions: {snapshot.get('destructive_mode', 'unknown')}\n"
             f"- Writable roots: {writable}\n"
-            "- If you want me fully hands-on, the remaining hard limit is macOS permissions for the app itself."
+            "- Remaining limits come from OS-level app permissions."
         )
 
     def _load_persona(self) -> dict[str, Any]:
@@ -1046,18 +1035,35 @@ class ConversationRouter:
 
     def _persona_system_prompt(self) -> str:
         assistant_name = str(self.persona.get("assistant_name", "BOSS")).strip() or "BOSS"
-        user_name = str(self.persona.get("user_name", "TJ")).strip() or "TJ"
-        relationship = str(self.persona.get("relationship", "personal operator")).strip()
+        user_name = str(self.persona.get("user_name", "")).strip()
+        relationship = str(self.persona.get("relationship", "engineering partner")).strip()
         tone = ", ".join(str(item) for item in self.persona.get("tone", []) if str(item).strip())
+        working_style = "\n".join(f"- {item}" for item in self.persona.get("working_style", []) if str(item).strip())
+        communication = "\n".join(
+            f"- {item}" for item in self.persona.get("communication_preferences", []) if str(item).strip()
+        )
+        user_preferences = "\n".join(
+            f"- {item}" for item in self.persona.get("user_preferences", []) if str(item).strip()
+        )
         rules = "\n".join(f"- {item}" for item in self.persona.get("rules", []) if str(item).strip())
         banned = "\n".join(f"- {item}" for item in self.persona.get("banned_phrases", []) if str(item).strip())
+        user_reference = f"{user_name}'s" if user_name else "the user's"
+        addressing = (
+            f"Address the user as {user_name} only when it feels natural."
+            if user_name
+            else "Do not force a name or personal label into replies."
+        )
         return (
-            f"You are {assistant_name}, {user_name}'s {relationship}.\n"
+            f"You are {assistant_name}, {user_reference} {relationship}.\n"
             f"Voice: {tone or 'direct, practical, calm'}.\n"
-            f"Be clear, grounded, and concise. Address the user as {user_name} only when it feels natural.\n"
+            f"Be clear, grounded, and concise. {addressing}\n"
             "Do not sound like a helpdesk bot, compliance banner, or hype-heavy assistant.\n"
             "Prefer plain language over internal system jargon.\n"
             "If access exists, use it without narrating generic limitations.\n"
+            "Adapt to the user's working style from recent history and the configured preferences below.\n"
+            f"Working style preferences:\n{working_style or '- Default to the smallest useful next action.'}\n"
+            f"Communication preferences:\n{communication or '- Use plain language.'}\n"
+            f"Known user preferences:\n{user_preferences or '- None recorded yet. Infer cautiously from recent history.'}\n"
             f"Behavior rules:\n{rules or '- Be direct and practical.'}\n"
             f"Avoid these phrases:\n{banned or '- I am here in workspace mode'}"
         )
@@ -1067,7 +1073,7 @@ class ConversationRouter:
         modules = ", ".join(project_map.main_modules[:8]) or "None"
         key_files = ", ".join(project_map.key_files[:8]) or "None"
         return (
-            f"TJ, here’s the shape of {project_map.name} 👇\n\n"
+            f"Project map for {project_map.name}.\n\n"
             f"Overview: {project_map.overview}\n"
             f"Languages: {languages}\n"
             f"Modules: {modules}\n"
@@ -1076,8 +1082,8 @@ class ConversationRouter:
 
     def _format_search(self, results: list[dict[str, Any]]) -> str:
         if not results:
-            return "TJ, I didn’t find a strong semantic match yet."
-        lines = ["TJ, here are the strongest matches I found 👇", ""]
+            return "I didn't find a strong semantic match yet."
+        lines = ["Top semantic matches:", ""]
         for item in results[:5]:
             metadata = item.get("metadata") if isinstance(item, dict) else {}
             file_path = metadata.get("file_path", "unknown") if isinstance(metadata, dict) else "unknown"
@@ -1101,9 +1107,9 @@ class ConversationRouter:
         skipped = int(result.get("suite_runs_skipped", 0) or 0)
         rate = f"{round((passed / attempted) * 100)}%" if attempted else "n/a"
         lines = [
-            "Boss — here’s the latest benchmark signal.",
+            "Latest benchmark summary.",
             "",
-            f"🧪 Suite runs: {passed}/{attempted} passed",
+            f"Suite runs: {passed}/{attempted} passed",
             f"Success rate: {rate}",
         ]
         if skipped:
@@ -1111,7 +1117,7 @@ class ConversationRouter:
         failure_map = result.get("failure_map") or {}
         primary_failure = str(failure_map.get("primary") or "").strip()
         if primary_failure:
-            lines.extend(["", f"⚠️ Main failure mode: {primary_failure}"])
+            lines.extend(["", f"Primary failure mode: {primary_failure}"])
         return "\n".join(lines)
 
     def _format_memory(self, snapshot: dict[str, Any]) -> str:
@@ -1147,7 +1153,7 @@ class ConversationRouter:
 
     def _format_workflow_result(self, result: WorkflowResult) -> str:
         return (
-            f"TJ, the code run finished after {result.iterations} iteration(s).\n"
+            f"Code run finished after {result.iterations} iteration(s).\n"
             f"Changed files: {', '.join(result.changed_files) or 'none'}\n\n"
             f"Audit: {'passed' if result.audit.passed else 'needs follow-up'}\n"
             f"{result.audit.text}"
@@ -1169,12 +1175,12 @@ class ConversationRouter:
             "",
         )
         lines = [
-            "Boss — autonomous build loop update ⚙️",
+            "Build status.",
             "",
             f"Goal: {getattr(result, 'goal', '') or 'Build task'}",
             f"Status: {result.status}",
-            f"Loop: {completed_steps}/{total_steps} step(s) completed" if total_steps else "Loop: starting",
-            f"Task ID: {result.task_id}",
+            f"Progress: {completed_steps}/{total_steps} step(s) completed" if total_steps else "Progress: starting",
+            f"Run ID: {result.task_id}",
             f"Changed files: {changed}",
         ]
         if next_step:
@@ -1189,16 +1195,16 @@ class ConversationRouter:
 
     def _format_task_status(self, task: dict[str, Any] | None) -> str:
         if not task:
-            return "Boss — there isn’t an active autonomous loop right now."
+            return "There isn't an active build run right now."
         steps = task.get("steps", []) or []
         completed = sum(1 for step in steps if str(step.get("status", "")).lower() == "completed")
         running = next((step for step in steps if str(step.get("status", "")).lower() == "running"), None)
         next_step = running or next((step for step in steps if str(step.get("status", "")).lower() not in {"completed"}), None)
         lines = [
-            "Boss — here’s the current autonomous loop.",
+            "Current build run.",
             "",
             f"Goal: {task.get('task') or 'Unknown task'}",
-            f"Loop #{task.get('id')}",
+            f"Run #{task.get('id')}",
             f"Status: {task.get('status') or 'unknown'}",
             f"Iteration: {completed}/{task.get('total_steps', len(steps)) or len(steps)} step(s) completed",
         ]
@@ -1209,15 +1215,15 @@ class ConversationRouter:
             lines.append(f"Files changed: {', '.join(files_changed[:6])}")
         errors = task.get("errors", []) or []
         if errors:
-            lines.extend(["", f"⚠️ Latest issue: {errors[-1]}"])
+            lines.extend(["", f"Latest issue: {errors[-1]}"])
         return "\n".join(lines)
 
     def _format_stop_result(self, task: dict[str, Any] | None) -> str:
         if not task:
-            return "Boss — there wasn’t an active autonomous loop to stop."
+            return "There wasn't an active build run to stop."
         return (
-            "Boss — stop requested.\n\n"
-            f"Loop #{task.get('id')} is now {task.get('status', 'stopping')}."
+            "Stop requested.\n\n"
+            f"Run #{task.get('id')} is now {task.get('status', 'stopping')}."
         )
 
     def _serialize_result(self, result: Any) -> Any:
