@@ -53,18 +53,28 @@ final class APIClient: Sendable {
 
     // MARK: - Streaming Chat
 
-    func streamChat(message: String, sessionId: String?, mode: WorkMode = .default) -> AsyncStream<SSEEvent> {
+    func streamChat(
+        message: String,
+        sessionId: String?,
+        mode: WorkMode = .default,
+        projectPath: String? = nil,
+        executionStyle: ExecutionStyle = .singlePass,
+        loopBudget: [String: Any]? = nil
+    ) -> AsyncStream<SSEEvent> {
         var req = URLRequest(url: URL(string: "\(baseURL)/api/chat")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        struct Body: Encodable {
-            let message: String
-            let session_id: String?
-            let mode: String
-        }
+        var body: [String: Any] = [
+            "message": message,
+            "mode": mode.rawValue,
+            "execution_style": executionStyle.rawValue,
+        ]
+        if let sessionId = sessionId { body["session_id"] = sessionId }
+        if let projectPath = projectPath { body["project_path"] = projectPath }
+        if let budget = loopBudget { body["loop_budget"] = budget }
 
-        req.httpBody = try? JSONEncoder().encode(Body(message: message, session_id: sessionId, mode: mode.rawValue))
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return stream(request: req)
     }
 
@@ -145,6 +155,22 @@ final class APIClient: Sendable {
             from: data,
             context: "/api/system/status",
             dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func fetchPromptDiagnostics(mode: String = "agent", agentName: String = "general", taskHint: String? = nil) async throws -> PromptDiagnosticsInfo {
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "mode", value: mode),
+            URLQueryItem(name: "agent_name", value: agentName),
+        ]
+        if let taskHint, !taskHint.isEmpty {
+            items.append(URLQueryItem(name: "task_hint", value: taskHint))
+        }
+        let data = try await get("/api/system/prompt-diagnostics", queryItems: items)
+        return try decode(
+            PromptDiagnosticsInfo.self,
+            from: data,
+            context: "/api/system/prompt-diagnostics"
         )
     }
 
@@ -234,26 +260,22 @@ final class APIClient: Sendable {
         sessionId: String?,
         mode: WorkMode,
         projectPath: String?,
-        branchMode: String? = nil
+        branchMode: String? = nil,
+        executionStyle: ExecutionStyle = .singlePass,
+        loopBudget: [String: Any]? = nil
     ) async throws -> BackgroundJobInfo {
-        struct Body: Encodable {
-            let message: String
-            let session_id: String?
-            let mode: String
-            let project_path: String?
-            let branch_mode: String?
-        }
+        var body: [String: Any] = [
+            "message": message,
+            "mode": mode.rawValue,
+            "execution_style": executionStyle.rawValue,
+        ]
+        if let sessionId = sessionId { body["session_id"] = sessionId }
+        if let projectPath = projectPath { body["project_path"] = projectPath }
+        if let branchMode = branchMode { body["branch_mode"] = branchMode }
+        if let budget = loopBudget { body["loop_budget"] = budget }
 
-        let body = try JSONEncoder().encode(
-            Body(
-                message: message,
-                session_id: sessionId,
-                mode: mode.rawValue,
-                project_path: projectPath,
-                branch_mode: branchMode
-            )
-        )
-        let data = try await post("/api/jobs", body: body)
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/jobs", body: jsonData)
         return try decode(
             BackgroundJobInfo.self,
             from: data,

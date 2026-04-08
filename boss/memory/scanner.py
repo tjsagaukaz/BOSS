@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -621,6 +622,154 @@ def _file_timestamp(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
 
+def _index_code_intelligence(project_path: str, indexed_files: list[Path]) -> dict[str, int]:
+    """Index supported source files into the code intelligence store.
+
+    Runs incrementally — files with unchanged content hashes are skipped.
+    Failures in this step are non-fatal to the main scan.
+    """
+    try:
+        from boss.intelligence.index import get_code_index
+        from boss.intelligence.parsers import detect_language
+    except Exception:
+        return {"indexed": 0, "skipped": 0, "errors": 0}
+
+    idx = get_code_index()
+    stats = {"indexed": 0, "skipped": 0, "errors": 0}
+    keep_paths: set[str] = set()
+
+    for path in indexed_files:
+        file_path = str(path)
+        if detect_language(file_path) is None:
+            continue
+        keep_paths.add(file_path)
+        try:
+            result = idx.index_file(file_path, project_path=project_path)
+            if result is not None:
+                stats["indexed"] += 1
+            else:
+                stats["skipped"] += 1
+        except Exception:
+            stats["errors"] += 1
+
+    idx.commit()
+    idx.prune_project(project_path, keep_paths)
+
+    # Generate embeddings for newly indexed or changed files (non-fatal)
+    _embed_indexed_files(project_path, keep_paths)
+
+    return stats
+
+
+def _embed_indexed_files(project_path: str, file_paths: set[str]) -> None:
+    """Generate and store embeddings for indexed source files.
+
+    Chunks each file by symbol definitions and stores the embeddings.
+    Skipped silently when no embeddings backend is available, the runner
+    network policy blocks outbound calls, or the API key is missing.
+    """
+    try:
+        from boss.intelligence.embeddings import (
+            EmbeddingRecord,
+            get_embeddings_backend,
+            get_embeddings_store,
+        )
+    except Exception:
+        return
+
+    backend = get_embeddings_backend()
+    if backend is None or not backend.available:
+        return
+
+    store = get_embeddings_store()
+    batch_texts: list[str] = []
+    batch_records: list[dict] = []  # partial records before vector is attached
+    _CHUNK_SIZE = 800  # chars per chunk
+    _MAX_CHUNKS_PER_FILE = 6
+    _MAX_BATCH = 50  # embed in batches to avoid huge API payloads
+
+    for file_path in sorted(file_paths):
+        try:
+            source = Path(file_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        if not source.strip() or len(source) > 200_000:
+            continue
+
+        # Chunk the source into segments
+        lines = source.splitlines(keepends=True)
+        chunks: list[tuple[int, int, str]] = []  # (line_start, line_end, content)
+        current_chunk: list[str] = []
+        chunk_start = 1
+        char_count = 0
+
+        for i, line in enumerate(lines, start=1):
+            current_chunk.append(line)
+            char_count += len(line)
+            if char_count >= _CHUNK_SIZE:
+                chunks.append((chunk_start, i, "".join(current_chunk)))
+                current_chunk = []
+                chunk_start = i + 1
+                char_count = 0
+                if len(chunks) >= _MAX_CHUNKS_PER_FILE:
+                    break
+
+        if current_chunk and len(chunks) < _MAX_CHUNKS_PER_FILE:
+            chunks.append((chunk_start, len(lines), "".join(current_chunk)))
+
+        # --- Incremental: skip unchanged chunks, remove stale ones ---
+        new_chunk_ids: set[str] = set()
+        existing_hashes = store.get_file_hashes(file_path)
+
+        for chunk_idx, (line_start, line_end, content) in enumerate(chunks):
+            chunk_id = f"{file_path}:{line_start}-{line_end}"
+            new_chunk_ids.add(chunk_id)
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+            if existing_hashes.get(chunk_id) == content_hash:
+                continue  # already embedded with identical content
+            batch_texts.append(content[:8000])
+            batch_records.append({
+                "chunk_id": chunk_id,
+                "file_path": file_path,
+                "project_path": project_path,
+                "content": content,
+                "line_start": line_start,
+                "line_end": line_end,
+            })
+
+        # Remove chunks whose line ranges no longer exist in this file
+        store.remove_stale_chunks(file_path, new_chunk_ids)
+
+    if not batch_texts:
+        return
+
+    # Embed in batches, gated by network policy inside embed_texts()
+    try:
+        for batch_start in range(0, len(batch_texts), _MAX_BATCH):
+            batch_end = min(batch_start + _MAX_BATCH, len(batch_texts))
+            vectors = backend.embed_texts(batch_texts[batch_start:batch_end])
+            records = []
+            for j, vec in enumerate(vectors):
+                rec_info = batch_records[batch_start + j]
+                records.append(EmbeddingRecord(
+                    chunk_id=rec_info["chunk_id"],
+                    file_path=rec_info["file_path"],
+                    project_path=rec_info["project_path"],
+                    content=rec_info["content"],
+                    line_start=rec_info["line_start"],
+                    line_end=rec_info["line_end"],
+                    vector=vec,
+                ))
+            store.store_embeddings(records)
+    except Exception:
+        # Non-fatal: network blocked, API key invalid, quota exceeded, etc.
+        pass
+
+    # Prune embeddings for files no longer in the project
+    store.prune_project(project_path, file_paths)
+
+
 def _scan_project(project_path: Path, store: KnowledgeStore) -> ProjectScanResult:
     project_type = _detect_project_type(project_path)
     git_remote, git_branch = _get_git_info(project_path)
@@ -672,6 +821,9 @@ def _scan_project(project_path: Path, store: KnowledgeStore) -> ProjectScanResul
 
     files_removed = store.prune_project_files(project.id, keep_paths, commit=False)
     store.commit_file_index()
+
+    # --- Code intelligence indexing ---
+    code_indexed = _index_code_intelligence(str(project_path), indexed_files)
 
     current_signature = _project_summary_signature(
         project_type=project.project_type,

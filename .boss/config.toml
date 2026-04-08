@@ -28,6 +28,24 @@ mode_name = "review"
 findings_first = true
 require_file_references = true
 auto_activate = true
+
+[runner]
+default_profile = "workspace_write"
+network_enabled = false
+# domain_allowlist = ["api.openai.com"]
+# writable_roots = []
+# env_scrub_keys = []
+
+[runner.mode_profiles]
+ask = "read_only"
+plan = "read_only"
+review = "read_only"
+agent = "workspace_write"
+
+[runner.commands]
+# allowed_prefixes = []
+# prompt_prefixes = []
+# denied_prefixes = []
 auto_mode_keywords = [
   "review",
   "code review",

@@ -40,6 +40,7 @@ from boss import __version__
 from boss.agents import build_entry_agent
 from boss.config import settings
 from boss.control import (
+    default_workspace_root,
     jobs_branch_behavior,
     jobs_takeover_cancels_background,
     load_boss_control,
@@ -134,6 +135,9 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
     mode: str = "agent"
+    project_path: str | None = None
+    execution_style: str = "single_pass"
+    loop_budget: dict | None = None
 
 
 class FactRequest(BaseModel):
@@ -180,6 +184,8 @@ class BackgroundJobCreateRequest(BaseModel):
     mode: str = "agent"
     project_path: str | None = None
     branch_mode: str | None = None
+    execution_style: str = "single_pass"
+    loop_budget: dict | None = None
 
 
 def _iso_timestamp(value: float | None) -> str | None:
@@ -761,7 +767,12 @@ async def _stream_chat_run(
     pending_run_id: str | None = None,
     initial_event: dict[str, Any] | None = None,
     mode: str | None = None,
+    workspace_root: str | None = None,
+    loop_id: str | None = None,
 ):
+    from boss.runner.engine import get_runner
+    get_runner(mode=mode, workspace_root=workspace_root)
+
     agent = build_entry_agent(mode=mode)
     current_input = run_input
     sent_session = False
@@ -861,6 +872,8 @@ async def _stream_chat_run(
                         approvals=unresolved,
                         run_id=pending_run_id,
                         mode=mode,
+                        project_path=workspace_root,
+                        loop_id=loop_id,
                     )
                     for approval in unresolved:
                         log_permission_event(
@@ -949,6 +962,7 @@ async def _run_background_job(
     emit_session: bool,
     pending_run_id: str | None = None,
     is_resume: bool = False,
+    workspace_root: str | None = None,
 ) -> None:
     job = load_background_job(job_id)
     if job is None:
@@ -980,6 +994,7 @@ async def _run_background_job(
             emit_session=emit_session,
             pending_run_id=pending_run_id,
             mode=mode,
+            workspace_root=workspace_root,
         ):
             payload = _decode_sse_payload(chunk)
             if payload is None:
@@ -1113,6 +1128,291 @@ async def _run_background_job(
         background_job_tasks.pop(job_id, None)
 
 
+async def _run_background_loop_job(
+    *,
+    job_id: str,
+    message: str,
+    session_id: str,
+    mode: str,
+    workspace_root: str | None = None,
+    loop_budget: dict | None = None,
+    resume_state: "LoopState | None" = None,
+    pending_run_input=None,
+    pending_run_id: str | None = None,
+) -> None:
+    """Run a background job using the iterative loop engine."""
+    from boss.loop.engine import LoopEngine
+    from boss.loop.policy import LoopBudget
+    from boss.loop.state import LoopState
+
+    job = load_background_job(job_id)
+    if job is None:
+        return
+
+    budget = LoopBudget.from_dict(loop_budget) if loop_budget else LoopBudget()
+    engine = LoopEngine(
+        task=message,
+        session_id=session_id,
+        budget=budget,
+        mode=mode,
+        workspace_root=workspace_root,
+        job_id=job_id,
+        resume_state=resume_state,
+    )
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    update_background_job(
+        job_id,
+        status=BackgroundJobStatus.RUNNING.value,
+        started_at=started_at,
+        finished_at=None,
+        error_message=None,
+        pending_run_id=None,
+        latest_event="Iterative loop started.",
+        loop_id=engine.state.loop_id,
+    )
+    append_background_job_log(
+        job_id,
+        event_type="loop_started",
+        message="Iterative loop execution started.",
+        payload={"budget": budget.to_dict(), "loop_id": engine.state.loop_id},
+    )
+
+    assistant_preview = ""
+    encountered_error: str | None = None
+
+    try:
+        # If resuming from a pending approval, replay the interrupted pass
+        # and evaluate its result before entering the engine loop.
+        if pending_run_input is not None and resume_state is not None:
+            from boss.loop.engine import _parse_loop_result
+            from boss.loop.state import save_loop_state as _save_ls
+
+            interrupted_text = ""
+            re_paused = False
+            async for chunk in _stream_chat_run(
+                run_input=pending_run_input,
+                session_id=session_id,
+                emit_session=False,
+                pending_run_id=pending_run_id,
+                mode=mode,
+                workspace_root=workspace_root,
+                loop_id=resume_state.loop_id,
+            ):
+                payload = _decode_sse_payload(chunk)
+                if payload:
+                    if payload.get("type") == "text":
+                        content = str(payload.get("content", ""))
+                        interrupted_text += content
+                        assistant_preview = (assistant_preview + content)[-12000:]
+                    if payload.get("type") == "permission_request":
+                        # The resumed pass needs another approval — re-pause.
+                        new_run_id = str(payload.get("run_id", ""))
+                        resume_state.pending_run_id = new_run_id
+                        resume_state.phase = "edit"
+                        resume_state.stop_reason = "approval_blocked"
+                        _save_ls(resume_state)
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        update_background_job(
+                            job_id,
+                            status=BackgroundJobStatus.WAITING_PERMISSION.value,
+                            pending_run_id=new_run_id,
+                            assistant_preview=assistant_preview,
+                            last_event_at=now_iso,
+                            latest_event=_job_log_message(payload),
+                        )
+                        append_background_job_log(
+                            job_id,
+                            event_type="permission_request",
+                            message=_job_log_message(payload),
+                            payload=payload,
+                        )
+                        re_paused = True
+                        break
+
+            if re_paused:
+                return
+
+            resumed_result = _parse_loop_result(interrupted_text)
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Update the interrupted attempt record
+            if resume_state.attempts:
+                last_att = resume_state.attempts[-1]
+                last_att.finished_at = time.time()
+                last_att.assistant_output = interrupted_text[-4000:]
+                if resumed_result == "success":
+                    last_att.test_passed = True
+
+            if resumed_result == "success":
+                resume_state.stop_reason = "success"
+                resume_state.finished_at = time.time()
+                resume_state.phase = "done"
+                _save_ls(resume_state)
+                update_background_job(
+                    job_id,
+                    status=BackgroundJobStatus.COMPLETED.value,
+                    finished_at=now_iso,
+                    pending_run_id=None,
+                    assistant_preview=assistant_preview,
+                    latest_event="Loop completed: success (resumed pass)",
+                )
+                return
+
+            if resumed_result == "stop":
+                resume_state.stop_reason = "agent_stopped"
+                resume_state.finished_at = time.time()
+                resume_state.phase = "done"
+                _save_ls(resume_state)
+                update_background_job(
+                    job_id,
+                    status=BackgroundJobStatus.FAILED.value,
+                    finished_at=now_iso,
+                    pending_run_id=None,
+                    assistant_preview=assistant_preview,
+                    latest_event="Loop stopped: agent_stopped (resumed pass)",
+                    error_message="agent_stopped",
+                )
+                return
+
+            # Retry or no directive — clear pause state and continue loop
+            resume_state.stop_reason = None
+            resume_state.pending_run_id = None
+            _save_ls(resume_state)
+
+        async for chunk in engine.run():
+            payload = _decode_sse_payload(chunk)
+            if payload is None:
+                continue
+
+            event_type = str(payload.get("type", "event"))
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            append_background_job_log(
+                job_id,
+                event_type=event_type,
+                message=_job_log_message(payload),
+                payload=payload,
+            )
+
+            if event_type == "text":
+                content = str(payload.get("content", ""))
+                assistant_preview = (assistant_preview + content)[-12000:]
+                if len(content) > 100 or content.endswith(("\n", ".", "!", "?")):
+                    update_background_job(
+                        job_id,
+                        assistant_preview=assistant_preview,
+                        last_event_at=now_iso,
+                        latest_event="Loop streaming output.",
+                    )
+
+            elif event_type == "loop_status":
+                status_val = payload.get("status", "")
+                stop_reason = payload.get("stop_reason", "")
+                latest = f"Loop {status_val}"
+                if stop_reason:
+                    latest += f": {stop_reason}"
+
+                if status_val in ("completed", "stopped"):
+                    final_job_status = (
+                        BackgroundJobStatus.COMPLETED.value
+                        if stop_reason == "success"
+                        else BackgroundJobStatus.FAILED.value
+                    )
+                    update_background_job(
+                        job_id,
+                        status=final_job_status,
+                        finished_at=now_iso,
+                        pending_run_id=None,
+                        assistant_preview=assistant_preview,
+                        latest_event=latest,
+                        error_message=stop_reason if final_job_status == BackgroundJobStatus.FAILED.value else None,
+                    )
+                    return
+
+                elif status_val == "paused":
+                    update_background_job(
+                        job_id,
+                        status=BackgroundJobStatus.WAITING_PERMISSION.value,
+                        pending_run_id=engine.state.pending_run_id,
+                        assistant_preview=assistant_preview,
+                        last_event_at=now_iso,
+                        latest_event=latest,
+                    )
+                    return
+
+                else:
+                    update_background_job(
+                        job_id,
+                        last_event_at=now_iso,
+                        latest_event=latest,
+                    )
+
+            elif event_type == "loop_attempt":
+                attempt_num = payload.get("attempt_number", "?")
+                update_background_job(
+                    job_id,
+                    last_event_at=now_iso,
+                    latest_event=f"Loop attempt {attempt_num}",
+                )
+
+            elif event_type == "error":
+                encountered_error = str(payload.get("message", "Unexpected error"))
+
+            elif event_type == "permission_request":
+                update_background_job(
+                    job_id,
+                    status=BackgroundJobStatus.WAITING_PERMISSION.value,
+                    pending_run_id=str(payload.get("run_id", "")),
+                    assistant_preview=assistant_preview,
+                    last_event_at=now_iso,
+                    latest_event=_job_log_message(payload),
+                )
+                return
+
+        # If we exit the loop without a terminal event
+        if encountered_error:
+            update_background_job(
+                job_id,
+                status=BackgroundJobStatus.FAILED.value,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                pending_run_id=None,
+                assistant_preview=assistant_preview,
+                latest_event=encountered_error,
+                error_message=encountered_error,
+            )
+        else:
+            update_background_job(
+                job_id,
+                status=BackgroundJobStatus.COMPLETED.value,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                pending_run_id=None,
+                assistant_preview=assistant_preview,
+                latest_event="Iterative loop finished.",
+            )
+
+    except asyncio.CancelledError:
+        update_background_job(
+            job_id,
+            status=BackgroundJobStatus.CANCELLED.value,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            pending_run_id=None,
+            latest_event="Iterative loop cancelled.",
+        )
+    except Exception as exc:
+        logger.exception("Loop job %s failed", job_id)
+        update_background_job(
+            job_id,
+            status=BackgroundJobStatus.FAILED.value,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            pending_run_id=None,
+            latest_event=str(exc),
+            error_message=str(exc),
+        )
+    finally:
+        background_job_tasks.pop(job_id, None)
+
+
 # --- Chat endpoint with SSE streaming ---
 
 @app.post("/api/chat")
@@ -1134,6 +1434,29 @@ async def chat_endpoint(req: ChatRequest):
         history_items=len(session.recent_items),
         resumed_session=bool(req.session_id),
     )
+
+    # Iterative loop flow
+    if req.execution_style == "iterative":
+        from boss.loop.engine import LoopEngine
+        from boss.loop.policy import LoopBudget
+
+        budget = LoopBudget.from_dict(req.loop_budget) if req.loop_budget else LoopBudget()
+        engine = LoopEngine(
+            task=req.message,
+            session_id=session_id,
+            budget=budget,
+            mode=resolved_mode,
+            workspace_root=req.project_path,
+        )
+
+        async def loop_stream():
+            yield sse_event({"type": "session", "session_id": session_id})
+            async for chunk in engine.run():
+                yield chunk
+            yield sse_event({"type": "done", "session_id": session_id})
+
+        return StreamingResponse(loop_stream(), media_type="text/event-stream")
+
     prepared_input = session_context_manager.prepare_input(session_id, req.message).model_input
 
     return StreamingResponse(
@@ -1142,6 +1465,7 @@ async def chat_endpoint(req: ChatRequest):
             session_id=session_id,
             emit_session=True,
             mode=resolved_mode,
+            workspace_root=req.project_path,
         ),
         media_type="text/event-stream",
     )
@@ -1220,6 +1544,144 @@ async def permission_decision_endpoint(req: PermissionDecisionRequest):
         approval_time_ms=approval_time_ms,
     )
 
+    if record.loop_id:
+        # Resume via the loop engine so remaining iterations continue.
+        from boss.loop.engine import LoopEngine
+        from boss.loop.policy import LoopBudget
+        from boss.loop.state import load_loop_state
+
+        loop_state = load_loop_state(record.loop_id)
+
+        async def _resume_loop_after_permission():
+            permission_event = {
+                "type": "permission_result",
+                "approval_id": approval.approval_id,
+                "decision": req.decision.value,
+                "source": "user",
+            }
+            yield sse_event(permission_event)
+
+            if loop_state is None:
+                yield sse_event({"type": "error", "message": "Loop state not found for resume."})
+                yield sse_event({"type": "done", "session_id": record.session_id})
+                return
+
+            budget = LoopBudget.from_dict(loop_state.budget)
+            engine = LoopEngine(
+                task=loop_state.task_description,
+                session_id=record.session_id,
+                budget=budget,
+                mode=record.mode or "agent",
+                workspace_root=record.project_path,
+                job_id=loop_state.job_id,
+                resume_state=loop_state,
+            )
+            # First, finish the interrupted agent pass with the approved state
+            from boss.loop.engine import _parse_loop_result
+            from boss.loop.state import save_loop_state as _save_ls
+
+            interrupted_text = ""
+            re_paused = False
+            async for chunk in _stream_chat_run(
+                run_input=state,
+                session_id=record.session_id,
+                emit_session=False,
+                pending_run_id=req.run_id,
+                mode=record.mode,
+                workspace_root=record.project_path,
+                loop_id=record.loop_id,
+            ):
+                payload = _decode_sse_payload(chunk)
+                if payload:
+                    if payload.get("type") == "done":
+                        continue  # suppress inner done
+                    if payload.get("type") == "text":
+                        interrupted_text += payload.get("content", "")
+                    if payload.get("type") == "permission_request":
+                        # The resumed pass needs another approval — save
+                        # the new pending state and stop.
+                        new_run_id = payload.get("run_id")
+                        if loop_state:
+                            loop_state.pending_run_id = new_run_id
+                            loop_state.phase = "edit"
+                            loop_state.stop_reason = "approval_blocked"
+                            _save_ls(loop_state)
+                        yield chunk
+                        yield sse_event({
+                            "type": "loop_status",
+                            "loop_id": record.loop_id,
+                            "status": "paused",
+                            "stop_reason": "approval_blocked",
+                            "attempt": loop_state.current_attempt if loop_state else 1,
+                        })
+                        yield sse_event({"type": "done", "session_id": record.session_id})
+                        re_paused = True
+                        return
+                yield chunk
+
+            if re_paused:
+                return
+
+            # Evaluate the interrupted pass before deciding whether to
+            # continue the loop or declare completion.
+            resumed_result = _parse_loop_result(interrupted_text)
+
+            # Update the interrupted attempt record in loop state
+            if loop_state and loop_state.attempts:
+                last_att = loop_state.attempts[-1]
+                last_att.finished_at = time.time()
+                last_att.assistant_output = interrupted_text[-4000:]
+                if resumed_result == "success":
+                    last_att.test_passed = True
+
+            if resumed_result == "success":
+                if loop_state:
+                    loop_state.stop_reason = "success"
+                    loop_state.finished_at = time.time()
+                    loop_state.phase = "done"
+                    _save_ls(loop_state)
+                yield sse_event({
+                    "type": "loop_status",
+                    "loop_id": record.loop_id,
+                    "status": "completed",
+                    "stop_reason": "success",
+                    "attempt": loop_state.current_attempt if loop_state else 1,
+                })
+                yield sse_event({"type": "done", "session_id": record.session_id})
+                return
+
+            if resumed_result == "stop":
+                if loop_state:
+                    loop_state.stop_reason = "agent_stopped"
+                    loop_state.finished_at = time.time()
+                    loop_state.phase = "done"
+                    _save_ls(loop_state)
+                yield sse_event({
+                    "type": "loop_status",
+                    "loop_id": record.loop_id,
+                    "status": "stopped",
+                    "stop_reason": "agent_stopped",
+                    "attempt": loop_state.current_attempt if loop_state else 1,
+                })
+                yield sse_event({"type": "done", "session_id": record.session_id})
+                return
+
+            # Result was retry or no directive — save state and continue loop
+            if loop_state:
+                loop_state.stop_reason = None
+                loop_state.pending_run_id = None
+                _save_ls(loop_state)
+
+            async for chunk in engine.run():
+                yield chunk
+
+            yield sse_event({"type": "done", "session_id": record.session_id})
+
+        return StreamingResponse(
+            _resume_loop_after_permission(),
+            media_type="text/event-stream",
+        )
+
     return StreamingResponse(
         _stream_chat_run(
             run_input=state,
@@ -1227,6 +1689,8 @@ async def permission_decision_endpoint(req: PermissionDecisionRequest):
             emit_session=False,
             pending_run_id=req.run_id,
             mode=record.mode,
+            workspace_root=record.project_path,
+            loop_id=record.loop_id,
             initial_event={
                 "type": "permission_result",
                 "approval_id": approval.approval_id,
@@ -1515,18 +1979,49 @@ async def create_job_endpoint(req: BackgroundJobCreateRequest):
         branch_status=branch_info.get("branch_status"),
         branch_message=branch_info.get("branch_message"),
         branch_helper_path=branch_info.get("branch_helper_path"),
+        execution_style=req.execution_style,
+        loop_budget=req.loop_budget,
     )
 
-    task = asyncio.create_task(
-        _run_background_job(
-            job_id=job.job_id,
-            run_input=prepared_input,
-            session_id=session_id,
-            mode=resolved_mode,
-            emit_session=True,
-        ),
-        name=f"boss-background-{job.job_id}",
-    )
+    # Create an isolated task workspace for the background job.
+    from boss.runner.workspace import create_task_workspace
+    task_slug = branch_info.get("task_slug") or job.job_id[:8]
+    try:
+        task_ws = create_task_workspace(
+            source_path=project_path,
+            task_slug=task_slug,
+            branch_name=branch_info.get("branch_name"),
+        )
+        effective_workspace = task_ws.workspace_path
+        update_background_job(job.job_id, task_workspace_path=effective_workspace)
+    except Exception:
+        logger.warning("Failed to create task workspace for job %s, using project_path", job.job_id, exc_info=True)
+        effective_workspace = project_path
+
+    if req.execution_style == "iterative":
+        task = asyncio.create_task(
+            _run_background_loop_job(
+                job_id=job.job_id,
+                message=message,
+                session_id=session_id,
+                mode=resolved_mode,
+                workspace_root=effective_workspace,
+                loop_budget=req.loop_budget,
+            ),
+            name=f"boss-loop-{job.job_id}",
+        )
+    else:
+        task = asyncio.create_task(
+            _run_background_job(
+                job_id=job.job_id,
+                run_input=prepared_input,
+                session_id=session_id,
+                mode=resolved_mode,
+                emit_session=True,
+                workspace_root=effective_workspace,
+            ),
+            name=f"boss-background-{job.job_id}",
+        )
     background_job_tasks[job.job_id] = task
     return _job_detail_payload(load_background_job(job.job_id) or job)
 
@@ -1593,32 +2088,69 @@ async def resume_job_endpoint(job_id: str):
 
         agent = build_entry_agent(mode=job.mode)
         run_input = await RunState.from_json(agent, pending.state)
-        task = asyncio.create_task(
-            _run_background_job(
-                job_id=job.job_id,
-                run_input=run_input,
-                session_id=job.session_id,
-                mode=job.mode,
-                emit_session=False,
-                pending_run_id=job.pending_run_id,
-                is_resume=True,
-            ),
-            name=f"boss-background-{job.job_id}",
-        )
+
+        if job.execution_style == "iterative" and job.loop_id:
+            from boss.loop.state import load_loop_state
+            loop_state = load_loop_state(job.loop_id)
+            task = asyncio.create_task(
+                _run_background_loop_job(
+                    job_id=job.job_id,
+                    message=job.prompt,
+                    session_id=job.session_id,
+                    mode=job.mode,
+                    workspace_root=job.task_workspace_path or job.project_path,
+                    loop_budget=job.loop_budget,
+                    resume_state=loop_state,
+                    pending_run_input=run_input,
+                    pending_run_id=job.pending_run_id,
+                ),
+                name=f"boss-loop-{job.job_id}",
+            )
+        else:
+            task = asyncio.create_task(
+                _run_background_job(
+                    job_id=job.job_id,
+                    run_input=run_input,
+                    session_id=job.session_id,
+                    mode=job.mode,
+                    emit_session=False,
+                    pending_run_id=job.pending_run_id,
+                    is_resume=True,
+                    workspace_root=job.task_workspace_path or job.project_path,
+                ),
+                name=f"boss-background-{job.job_id}",
+            )
         background_job_tasks[job.job_id] = task
         return _job_detail_payload(load_background_job(job.job_id) or job)
 
-    task = asyncio.create_task(
-        _run_background_job(
-            job_id=job.job_id,
-            run_input=job.initial_input_payload,
-            session_id=job.session_id,
-            mode=job.mode,
-            emit_session=not job.session_persisted,
-            is_resume=True,
-        ),
-        name=f"boss-background-{job.job_id}",
-    )
+    if job.execution_style == "iterative":
+        from boss.loop.state import load_loop_state
+        loop_state = load_loop_state(job.loop_id) if job.loop_id else None
+        task = asyncio.create_task(
+            _run_background_loop_job(
+                job_id=job.job_id,
+                message=job.prompt,
+                session_id=job.session_id,
+                mode=job.mode,
+                workspace_root=job.task_workspace_path or job.project_path,
+                loop_budget=job.loop_budget,
+                resume_state=loop_state,
+            ),
+            name=f"boss-loop-{job.job_id}",
+        )
+    else:
+        task = asyncio.create_task(
+            _run_background_job(
+                job_id=job.job_id,
+                run_input=job.initial_input_payload,
+                session_id=job.session_id,
+                mode=job.mode,
+                emit_session=not job.session_persisted,
+                is_resume=True,
+                workspace_root=job.task_workspace_path or job.project_path,
+            ),
+            name=f"boss-background-{job.job_id}",
+        )
     background_job_tasks[job.job_id] = task
     return _job_detail_payload(load_background_job(job.job_id) or job)
 
@@ -1724,6 +2256,25 @@ def _diagnostics_summary(
         "rules_count": int(control_health.get("rules_count", 0) or 0),
     }
 
+
+# --- Loop endpoints ---
+
+@app.get("/api/loop/{loop_id}")
+async def get_loop_state_endpoint(loop_id: str):
+    from boss.loop.state import load_loop_state
+    state = load_loop_state(loop_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Loop run not found")
+    return state.to_dict()
+
+
+@app.get("/api/loop")
+async def list_loop_states_endpoint(limit: int = 20):
+    from boss.loop.state import list_loop_states
+    states = list_loop_states(limit=limit)
+    return [s.to_dict() for s in states]
+
+
 @app.post("/api/system/scan")
 async def trigger_scan():
     result = full_scan()
@@ -1789,7 +2340,140 @@ async def system_status():
         "pending_runs_path": str(settings.pending_runs_dir),
         "background_jobs_path": str(settings.jobs_dir),
         "background_job_logs_path": str(settings.job_logs_dir),
+        "runner": runtime.get("runner"),
     }
+
+
+@app.get("/api/system/prompt-diagnostics")
+async def prompt_diagnostics(mode: str = "agent", agent_name: str = "general", task_hint: str | None = None):
+    """Inspect the layered prompt that would be assembled for a given mode and agent."""
+    from boss.prompting.builder import PromptBuilder
+    result = (
+        PromptBuilder(mode=mode, agent_name=agent_name)
+        .with_workspace(default_workspace_root())
+        .with_task_hint(task_hint)
+        .build()
+    )
+    summary = result.safe_summary()
+    return {
+        "mode": mode,
+        "agent_name": agent_name,
+        "task_hint": task_hint,
+        **result.diagnostics(),
+        **summary,
+        "instructions_preview": result.text[:2000],
+    }
+
+
+# --- Runner / Task Workspace endpoints ---
+
+@app.get("/api/runner/policy")
+async def runner_policy(mode: str | None = None):
+    from boss.runner.policy import runner_config_for_mode
+    policy = runner_config_for_mode(mode)
+    return policy.to_dict()
+
+
+@app.get("/api/runner/workspaces")
+async def runner_workspaces(state: str | None = None, limit: int = 50):
+    from boss.runner.workspace import list_task_workspaces
+    workspaces = list_task_workspaces(state=state, limit=limit)
+    return {"workspaces": [ws.to_dict() for ws in workspaces]}
+
+
+@app.get("/api/runner/sandbox")
+async def runner_sandbox():
+    from boss.runner.sandbox import sandbox_status_payload
+    return sandbox_status_payload()
+
+
+# --- Code Intelligence endpoints ---
+
+@app.get("/api/intelligence/symbols")
+async def intelligence_symbols(
+    name: str,
+    kind: str | None = None,
+    project: str | None = None,
+    limit: int = 20,
+):
+    from boss.intelligence.index import get_code_index
+    idx = get_code_index()
+    results = idx.find_symbol(name, kind=kind, project_path=project, limit=limit)
+    return {"symbols": [r.to_dict() for r in results]}
+
+
+@app.get("/api/intelligence/definition")
+async def intelligence_definition(
+    name: str,
+    project: str | None = None,
+):
+    from boss.intelligence.index import get_code_index
+    idx = get_code_index()
+    results = idx.find_definition(name, project_path=project, limit=10)
+    return {"definitions": [r.to_dict() for r in results]}
+
+
+@app.get("/api/intelligence/search")
+async def intelligence_search(
+    query: str,
+    project: str | None = None,
+    limit: int = 15,
+):
+    from boss.intelligence.retrieval import hybrid_search
+    results, caps = hybrid_search(query, project_path=project, limit=limit)
+    return {
+        "results": [r.to_dict() for r in results],
+        "capabilities": {
+            "symbol_search": caps.symbol_search,
+            "keyword_search": caps.keyword_search,
+            "memory_search": caps.memory_search,
+            "semantic_search": caps.semantic_search,
+        },
+    }
+
+
+@app.get("/api/intelligence/graph")
+async def intelligence_graph(project: str):
+    from boss.intelligence.index import get_code_index
+    idx = get_code_index()
+    return idx.project_graph(project)
+
+
+@app.get("/api/intelligence/importers")
+async def intelligence_importers(
+    module_or_symbol: str,
+    project: str | None = None,
+    limit: int = 20,
+):
+    from boss.intelligence.index import get_code_index
+    idx = get_code_index()
+    results = idx.find_importers(module_or_symbol, project_path=project, limit=limit)
+    return {"importers": [r.to_dict() for r in results]}
+
+
+@app.get("/api/intelligence/stats")
+async def intelligence_stats():
+    from boss.intelligence.index import get_code_index
+    idx = get_code_index()
+    stats = idx.stats()
+    try:
+        from boss.intelligence.embeddings import get_embeddings_store
+        emb_stats = get_embeddings_store().stats()
+        stats.update(emb_stats)
+    except Exception:
+        pass
+    try:
+        from boss.intelligence.retrieval import capabilities
+        caps = capabilities()
+        stats["capabilities"] = {
+            "symbol_search": caps.symbol_search,
+            "keyword_search": caps.keyword_search,
+            "memory_search": caps.memory_search,
+            "semantic_search": caps.semantic_search,
+        }
+    except Exception:
+        pass
+    return stats
 
 
 # --- Warm-up on startup ---

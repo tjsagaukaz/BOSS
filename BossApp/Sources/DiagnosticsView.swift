@@ -18,6 +18,7 @@ struct DiagnosticsView: View {
                     repoCard(status)
                     runtimeCard(status)
                     bossControlCard(status)
+                    promptLayersCard
                 } else {
                     emptyState
                 }
@@ -192,6 +193,93 @@ struct DiagnosticsView: View {
                     .foregroundColor(Color.white.opacity(0.34))
                     .lineLimit(1)
             }
+        }
+    }
+
+    private var promptLayersCard: some View {
+        let diag = vm.promptDiagnostics
+        return card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Prompt Layers")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.9))
+
+                    if let diag {
+                        statusBadge("\(diag.activeLayers)/\(diag.totalLayers) active")
+                    }
+                }
+
+                if let diag {
+                    HStack(spacing: 24) {
+                        metric(label: "Mode", value: diag.mode)
+                        metric(label: "Agent", value: diag.agentName)
+                        metric(label: "Chars", value: "\(diag.totalChars)")
+                    }
+
+                    HStack(spacing: 16) {
+                        flagBadge("Review", active: diag.reviewGuidanceActive ?? false)
+                        flagBadge("Frontend", active: diag.frontendGuidanceActive ?? false)
+                    }
+
+                    if let kinds = diag.activeKinds, !kinds.isEmpty {
+                        metadataLine(label: "Active Kinds", value: kinds.joined(separator: ", "))
+                    }
+
+                    if let sources = diag.instructionSources, !sources.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("INSTRUCTION SOURCES")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Color.white.opacity(0.28))
+                                .tracking(1.0)
+                            ForEach(sources, id: \.self) { source in
+                                Text(source)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Color.white.opacity(0.52))
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+
+                    if let layers = diag.layers {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("LAYERS")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(Color.white.opacity(0.28))
+                                .tracking(1.0)
+                            ForEach(Array(layers.enumerated()), id: \.offset) { _, layer in
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(layer.active ? Color.green.opacity(0.7) : Color.white.opacity(0.15))
+                                        .frame(width: 6, height: 6)
+                                    Text(layer.kind)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(Color.white.opacity(layer.active ? 0.78 : 0.32))
+                                    Spacer()
+                                    Text("\(layer.contentLength) chars")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(Color.white.opacity(0.28))
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text("Prompt diagnostics not loaded.")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.42))
+                }
+            }
+        }
+    }
+
+    private func flagBadge(_ label: String, active: Bool) -> some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(active ? Color.green.opacity(0.7) : Color.white.opacity(0.15))
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(Color.white.opacity(active ? 0.78 : 0.38))
         }
     }
 

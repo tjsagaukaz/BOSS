@@ -72,6 +72,10 @@ class BackgroundJobRecord:
     branch_status: str | None = None
     branch_message: str | None = None
     branch_helper_path: str | None = None
+    task_workspace_path: str | None = None
+    execution_style: str | None = None
+    loop_budget: dict | None = None
+    loop_id: str | None = None
 
 
 def ensure_background_job_dirs() -> tuple[Path, Path]:
@@ -104,6 +108,9 @@ def create_background_job(
     branch_status: str | None = None,
     branch_message: str | None = None,
     branch_helper_path: str | None = None,
+    execution_style: str | None = None,
+    loop_budget: dict | None = None,
+    loop_id: str | None = None,
 ) -> BackgroundJobRecord:
     job_id = uuid.uuid4().hex
     log_path = background_job_log_path(job_id)
@@ -127,6 +134,9 @@ def create_background_job(
         branch_status=branch_status,
         branch_message=branch_message,
         branch_helper_path=branch_helper_path,
+        execution_style=execution_style,
+        loop_budget=loop_budget,
+        loop_id=loop_id,
     )
     save_background_job(record)
     append_background_job_log(
@@ -426,6 +436,10 @@ def _background_job_from_payload(payload: dict[str, Any]) -> BackgroundJobRecord
             branch_status=_optional_string(payload.get("branch_status")),
             branch_message=_optional_string(payload.get("branch_message")),
             branch_helper_path=_optional_string(payload.get("branch_helper_path")),
+            task_workspace_path=_optional_string(payload.get("task_workspace_path")),
+            execution_style=_optional_string(payload.get("execution_style")),
+            loop_budget=payload.get("loop_budget"),
+            loop_id=_optional_string(payload.get("loop_id")),
         )
     except (KeyError, TypeError, ValueError):
         return None

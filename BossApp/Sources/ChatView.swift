@@ -244,6 +244,38 @@ struct ChatView: View {
                 .menuStyle(.borderlessButton)
                 .buttonStyle(.plain)
 
+                Menu {
+                    ForEach(ExecutionStyle.allCases, id: \.rawValue) { style in
+                        Button {
+                            vm.selectedExecutionStyle = style
+                        } label: {
+                            HStack {
+                                Text(style.label)
+                                Spacer()
+                                if vm.selectedExecutionStyle == style {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: vm.selectedExecutionStyle == .iterative ? "repeat" : "play")
+                            .font(.system(size: 10))
+                        Text(vm.selectedExecutionStyle.label)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(Typo.secondaryText)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule()
+                            .fill(Color.white.opacity(0.05))
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .buttonStyle(.plain)
+
                 Spacer(minLength: 12)
 
                 Button(action: { vm.launchBackgroundJob() }) {
@@ -409,6 +441,12 @@ struct MessageView: View {
                     }
                 }
                 .padding(.bottom, message.content.isEmpty ? 0 : 14)
+            }
+
+            // Loop progress widget
+            if let loopStatus = message.loopStatus {
+                LoopProgressView(status: loopStatus)
+                    .padding(.bottom, 8)
             }
 
             // Content: crossfade from streaming plain text to block-parsed markdown

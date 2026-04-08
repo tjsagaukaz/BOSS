@@ -13,9 +13,28 @@ from boss.execution import (
     hashed_scope,
     scope_value,
 )
+from boss.runner.engine import current_runner
+from boss.runner.policy import CommandVerdict
 
 
 def _run_command(command: list[str], *, input_text: str | None = None, timeout: int = 10) -> str:
+    runner = current_runner()
+    if runner is not None:
+        result = runner.run_command(command, input_text=input_text, timeout=timeout)
+        if result.verdict == CommandVerdict.DENIED.value:
+            raise RuntimeError(
+                result.denied_reason or f"Command denied by {result.policy_profile} policy: {' '.join(command)}"
+            )
+        if result.verdict == CommandVerdict.PROMPT.value:
+            raise RuntimeError(
+                result.denied_reason or f"Command requires approval under {result.policy_profile} policy: {' '.join(command)}"
+            )
+        output = result.output
+        if result.exit_code is not None and result.exit_code != 0:
+            raise RuntimeError(output or f"Command failed: {' '.join(command)}")
+        return output
+
+    # Fallback: direct execution when no runner is active
     result = subprocess.run(
         command,
         input=input_text,
@@ -38,7 +57,7 @@ def _run_command(command: list[str], *, input_text: str | None = None, timeout: 
     scope_label=lambda params: display_value(params.get("app_name"), fallback="Unknown app"),
 )
 def open_app(app_name: str) -> str:
-    subprocess.run(["open", "-a", app_name], check=True)
+    _run_command(["open", "-a", app_name])
     return f"Opened {app_name}"
 
 
@@ -121,5 +140,5 @@ def send_notification(title: str, message: str) -> str:
     ),
 )
 def screenshot(filepath: str = "/tmp/boss-screenshot.png") -> str:
-    subprocess.run(["screencapture", "-x", filepath], check=True)
+    _run_command(["screencapture", "-x", filepath])
     return f"Screenshot saved to {filepath}"

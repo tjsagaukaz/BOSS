@@ -12,6 +12,7 @@ final class ChatViewModel: ObservableObject {
     @Published var pendingPermissionCount: Int = 0
     @Published var sessionId: String = UUID().uuidString
     @Published var selectedMode: WorkMode = .default
+    @Published var selectedExecutionStyle: ExecutionStyle = .singlePass
     @Published var draftAttachments: [AttachmentItem] = []
     @Published var selectedSurface: AppSurface = .chat
     @Published var selectedProjectPath: String?
@@ -39,6 +40,7 @@ final class ChatViewModel: ObservableObject {
     @Published var sidebarRefreshError: String?
     @Published var memoryRefreshError: String?
     @Published var diagnosticsRefreshError: String?
+    @Published var promptDiagnostics: PromptDiagnosticsInfo?
     @Published var jobsRefreshError: String?
     @Published var reviewRefreshError: String?
     @Published var permissionsRefreshError: String?
@@ -75,7 +77,13 @@ final class ChatViewModel: ObservableObject {
                 return
             }
             await consumeStream(
-                api.streamChat(message: requestText, sessionId: sessionId, mode: selectedMode),
+                api.streamChat(
+                    message: requestText,
+                    sessionId: sessionId,
+                    mode: selectedMode,
+                    projectPath: selectedProjectPath,
+                    executionStyle: selectedExecutionStyle
+                ),
                 for: assistantMsg.id
             )
         }
@@ -305,6 +313,48 @@ final class ChatViewModel: ObservableObject {
             messages[messageIndex].isStreaming = false
             return true
 
+        case "loop_status":
+            let loopId = event.data["loop_id"] ?? ""
+            let status = event.data["status"] ?? ""
+            let stopReason = event.data["stop_reason"]
+            let attempt = event.data["attempt"].flatMap { Int($0) }
+            let task = event.data["task"]
+
+            var budgetRemaining: LoopStatusInfo.LoopBudgetRemaining?
+            if let brJSON = event.data["budget_remaining"],
+               let brData = brJSON.data(using: .utf8),
+               let br = try? JSONSerialization.jsonObject(with: brData) as? [String: Any] {
+                budgetRemaining = LoopStatusInfo.LoopBudgetRemaining(
+                    attempts: br["attempts"] as? Int,
+                    commands: br["commands"] as? Int,
+                    wallSeconds: br["wall_seconds"] as? Double
+                )
+            }
+
+            messages[messageIndex].loopStatus = LoopStatusInfo(
+                loopId: loopId,
+                status: status,
+                stopReason: stopReason,
+                attempt: attempt,
+                budgetRemaining: budgetRemaining,
+                task: task
+            )
+
+        case "loop_attempt":
+            if let attemptStr = event.data["attempt_number"],
+               let attemptNum = Int(attemptStr) {
+                if let ls = messages[messageIndex].loopStatus {
+                    messages[messageIndex].loopStatus = LoopStatusInfo(
+                        loopId: ls.loopId,
+                        status: "running",
+                        stopReason: nil,
+                        attempt: attemptNum,
+                        budgetRemaining: ls.budgetRemaining,
+                        task: ls.task
+                    )
+                }
+            }
+
         default:
             break
         }
@@ -403,6 +453,7 @@ final class ChatViewModel: ObservableObject {
     func refreshDiagnosticsSurface() async {
         do {
             systemStatus = try await api.fetchSystemStatus()
+            promptDiagnostics = try? await api.fetchPromptDiagnostics(mode: selectedMode.rawValue)
             diagnosticsRefreshError = nil
         } catch {
             diagnosticsRefreshError = "Diagnostics refresh failed. \(errorMessage(error))"
@@ -535,6 +586,7 @@ final class ChatViewModel: ObservableObject {
         let jobSessionId = sessionId
         let mode = selectedMode
         let projectPath = selectedProjectPath
+        let execStyle = selectedExecutionStyle
 
         Task {
             guard await ensureBackendReadyForBackgroundAction() else {
@@ -547,7 +599,8 @@ final class ChatViewModel: ObservableObject {
                     message: requestText,
                     sessionId: jobSessionId,
                     mode: mode,
-                    projectPath: projectPath
+                    projectPath: projectPath,
+                    executionStyle: execStyle
                 )
                 inputText = ""
                 draftAttachments = []

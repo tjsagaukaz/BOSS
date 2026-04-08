@@ -305,6 +305,7 @@ def runtime_status_payload() -> dict[str, Any]:
         "git": git_status_payload(workspace_root()),
         "runtime_trust": runtime_trust_report(),
         "boss_control": boss_control_status_payload(workspace_root()),
+        "runner": _runner_status(),
     }
 
 
@@ -461,6 +462,26 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _runner_status() -> dict[str, Any]:
+    try:
+        from boss.runner.engine import current_runner
+        from boss.runner.sandbox import sandbox_status_payload
+        runner = current_runner()
+        return {
+            "available": True,
+            "active": runner is not None,
+            "policy": runner.policy.to_dict() if runner else None,
+            "sandbox": sandbox_status_payload(),
+        }
+    except Exception:
+        return {
+            "available": False,
+            "active": False,
+            "policy": None,
+            "sandbox": None,
+        }
 
 
 atexit.register(release_api_server_lock)

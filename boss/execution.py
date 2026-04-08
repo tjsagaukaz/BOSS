@@ -89,9 +89,11 @@ class PendingRun:
     approvals: list[PendingApproval]
     updated_at: float
     mode: str | None = None
+    project_path: str | None = None
     status: str = PendingStatus.PENDING.value
     expires_at: float | None = None
     expired_at: float | None = None
+    loop_id: str | None = None
 
 
 _TOOL_METADATA: dict[str, ToolMetadata] = {}
@@ -635,6 +637,8 @@ def save_pending_run(
     approvals: list[PendingApproval],
     run_id: str | None = None,
     mode: str | None = None,
+    project_path: str | None = None,
+    loop_id: str | None = None,
 ) -> str:
     run_id = run_id or uuid.uuid4().hex
     settings.pending_runs_dir.mkdir(parents=True, exist_ok=True)
@@ -663,9 +667,11 @@ def save_pending_run(
         approvals=hydrated_approvals,
         updated_at=now,
         mode=mode,
+        project_path=project_path,
         status=PendingStatus.PENDING.value,
         expires_at=expires_at,
         expired_at=None,
+        loop_id=loop_id,
     )
     _write_json(settings.pending_runs_dir / f"{run_id}.json", asdict(record))
     return run_id
@@ -690,9 +696,11 @@ def _pending_run_from_payload(payload: dict[str, Any]) -> PendingRun | None:
             approvals=approvals,
             updated_at=updated_at,
             mode=payload.get("mode"),
+            project_path=payload.get("project_path"),
             status=payload.get("status", PendingStatus.PENDING.value),
             expires_at=float(expires_at) if expires_at is not None else _expiry_deadline(updated_at),
             expired_at=float(expired_at) if expired_at is not None else None,
+            loop_id=payload.get("loop_id"),
         )
     except (KeyError, TypeError, ValueError):
         return None

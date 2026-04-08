@@ -122,6 +122,7 @@ struct ChatMessage: Identifiable, Equatable {
     var executionSteps: [ExecutionStep] = []
     var thinkingContent: String?
     var attachments: [AttachmentItem] = []
+    var loopStatus: LoopStatusInfo?
     let timestamp = Date()
 
     enum Role: Equatable {
@@ -138,7 +139,8 @@ struct ChatMessage: Identifiable, Equatable {
         lhs.agent == rhs.agent &&
         lhs.executionSteps == rhs.executionSteps &&
         lhs.thinkingContent == rhs.thinkingContent &&
-        lhs.attachments == rhs.attachments
+        lhs.attachments == rhs.attachments &&
+        lhs.loopStatus == rhs.loopStatus
     }
 }
 
@@ -899,6 +901,46 @@ struct BossControlHealthInfo: Decodable {
     }
 }
 
+struct PromptLayerInfo: Decodable {
+    let kind: String
+    let source: String
+    let active: Bool
+    let contentLength: Int
+
+    enum CodingKeys: String, CodingKey {
+        case kind, source, active
+        case contentLength = "content_length"
+    }
+}
+
+struct PromptDiagnosticsInfo: Decodable {
+    let mode: String
+    let agentName: String
+    let taskHint: String?
+    let totalLayers: Int
+    let activeLayers: Int
+    let totalChars: Int
+    let activeKinds: [String]?
+    let instructionSources: [String]?
+    let reviewGuidanceActive: Bool?
+    let frontendGuidanceActive: Bool?
+    let layers: [PromptLayerInfo]?
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case agentName = "agent_name"
+        case taskHint = "task_hint"
+        case totalLayers = "total_layers"
+        case activeLayers = "active_layers"
+        case totalChars = "total_chars"
+        case activeKinds = "active_kinds"
+        case instructionSources = "instruction_sources"
+        case reviewGuidanceActive = "review_guidance_active"
+        case frontendGuidanceActive = "frontend_guidance_active"
+        case layers
+    }
+}
+
 struct DiagnosticsSummaryInfo: Decodable {
     let providerMode: String?
     let gitAvailable: Bool?
@@ -1004,4 +1046,47 @@ struct AgentInfo {
         default:          return AgentInfo(icon: "questionmark.circle", display: name)
         }
     }
+}
+
+// MARK: - Loop
+
+enum ExecutionStyle: String, CaseIterable, Codable, Equatable {
+    case singlePass = "single_pass"
+    case iterative = "iterative"
+
+    var label: String {
+        switch self {
+        case .singlePass: return "Single Pass"
+        case .iterative: return "Iterative Loop"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .singlePass: return "Standard one-shot response"
+        case .iterative: return "Bounded edit-run-test-fix loop"
+        }
+    }
+}
+
+struct LoopStatusInfo: Equatable {
+    let loopId: String
+    let status: String
+    let stopReason: String?
+    let attempt: Int?
+    let budgetRemaining: LoopBudgetRemaining?
+    let task: String?
+
+    struct LoopBudgetRemaining: Equatable {
+        let attempts: Int?
+        let commands: Int?
+        let wallSeconds: Double?
+    }
+}
+
+struct LoopAttemptInfo: Equatable {
+    let loopId: String
+    let attemptNumber: Int
+    let phase: String
+    let budgetRemaining: LoopStatusInfo.LoopBudgetRemaining?
 }
