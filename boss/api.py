@@ -312,6 +312,13 @@ def _build_takeover_payload(job: Any) -> dict[str, Any]:
     }
 
 
+def _clear_background_job_pending_run(job: Any) -> Any:
+    if not job.pending_run_id:
+        return job
+    delete_pending_run(job.pending_run_id)
+    return update_background_job(job.job_id, pending_run_id=None)
+
+
 def _tokenize_query(text: str) -> list[str]:
     tokens = re.findall(r"[a-zA-Z0-9._/-]{3,}", text.lower())
     seen: set[str] = set()
@@ -589,7 +596,7 @@ def _memory_overview_payload(*, session_id: str | None = None, message: str | No
         injection = (
             session_context_manager.preview_memory_injection(session_id, preview_message)
             if session_id
-            else build_memory_injection(user_message=preview_message)
+            else build_memory_injection(user_message=preview_message, read_only=True)
         )
         current_turn_memory = {
             "message": preview_message,
@@ -915,9 +922,11 @@ async def _cancel_background_job(job_id: str, *, final_status: str, reason: str)
     )
     append_background_job_log(job_id, event_type=final_status, message=reason)
 
-    if job.pending_run_id and final_status == BackgroundJobStatus.CANCELLED.value:
-        delete_pending_run(job.pending_run_id)
-        job = update_background_job(job_id, pending_run_id=None)
+    if job.pending_run_id and final_status in {
+        BackgroundJobStatus.CANCELLED.value,
+        BackgroundJobStatus.TAKEN_OVER.value,
+    }:
+        job = _clear_background_job_pending_run(job)
 
     task = background_job_tasks.get(job_id)
     if task is not None:
@@ -1083,7 +1092,10 @@ async def _run_background_job(
                 finished_at=datetime.now(timezone.utc).isoformat(),
                 assistant_preview=current.assistant_preview,
                 latest_event=latest_event,
-                pending_run_id=None if final_status == BackgroundJobStatus.CANCELLED.value else current.pending_run_id,
+                pending_run_id=None if final_status in {
+                    BackgroundJobStatus.CANCELLED.value,
+                    BackgroundJobStatus.TAKEN_OVER.value,
+                } else current.pending_run_id,
             )
             append_background_job_log(job_id, event_type=final_status, message=latest_event)
         raise
@@ -1629,6 +1641,7 @@ async def takeover_job_endpoint(job_id: str):
             status=BackgroundJobStatus.TAKEN_OVER.value,
             latest_event="Background job taken over into the foreground chat.",
         )
+        job = _clear_background_job_pending_run(job)
         append_background_job_log(job_id, event_type="taken_over", message="Background job taken over into the foreground chat.")
 
     return _build_takeover_payload(load_background_job(job_id) or job)

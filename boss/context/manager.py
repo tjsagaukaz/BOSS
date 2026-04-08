@@ -89,6 +89,7 @@ class SessionContextManager:
             user_message=user_message,
             session_summary=session.summary,
             session_id=session_id,
+            read_only=True,
         )
 
     def persist_result(self, session_id: str, run_history: list[Any]) -> SessionState:

@@ -1459,6 +1459,7 @@ class KnowledgeStore:
         project_path: str | None = None,
         session_id: str | None = None,
         kinds: Iterable[str] | None = None,
+        touch_results: bool = True,
     ) -> list[MemorySearchResult]:
         query = query.strip()
         if not query:
@@ -1528,7 +1529,8 @@ class KnowledgeStore:
             key=lambda item: (item.score, item.updated_at),
             reverse=True,
         )[:limit]
-        self._touch_search_results(ranked)
+        if touch_results:
+            self._touch_search_results(ranked)
         return ranked
 
     def search_file_chunks(
@@ -1537,8 +1539,15 @@ class KnowledgeStore:
         limit: int = 10,
         *,
         project_path: str | None = None,
+        touch_results: bool = True,
     ) -> list[FileChunk]:
-        results = self.search_memories(query, limit=limit, project_path=project_path, kinds={"file_chunk"})
+        results = self.search_memories(
+            query,
+            limit=limit,
+            project_path=project_path,
+            kinds={"file_chunk"},
+            touch_results=touch_results,
+        )
         chunk_ids = [result.id for result in results if result.source_table == "file_chunks"]
         if not chunk_ids:
             return []

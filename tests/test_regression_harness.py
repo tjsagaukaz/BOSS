@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import importlib
 import json
 import os
 import subprocess
@@ -83,6 +85,14 @@ def isolated_knowledge_store(db_path: Path):
     finally:
         store.close()
         knowledge_module._store = original_store
+
+
+def import_api_module():
+    existing = sys.modules.get("boss.api")
+    if existing is not None:
+        return existing
+    with patch("boss.runtime.ensure_api_server_lock", return_value={"pid": os.getpid()}):
+        return importlib.import_module("boss.api")
 
 
 class RegressionHarnessTests(unittest.TestCase):
@@ -466,6 +476,71 @@ class RegressionHarnessTests(unittest.TestCase):
                 self.assertEqual(waiting.resume_count, 1)
                 self.assertEqual(completed.status, BackgroundJobStatus.COMPLETED.value)
                 self.assertTrue(completed.session_persisted)
+
+    def test_takeover_clears_pending_run_for_waiting_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            jobs_dir = root / "jobs"
+            logs_dir = root / "job-logs"
+            pending_dir = root / "pending-runs"
+            history_dir = root / "history"
+
+            with override_settings(
+                jobs_dir=jobs_dir,
+                job_logs_dir=logs_dir,
+                pending_runs_dir=pending_dir,
+                history_dir=history_dir,
+            ):
+                for cancels_background in (True, False):
+                    session_id = f"session-job-takeover-{int(cancels_background)}"
+                    job = create_background_job(
+                        prompt="Wait for approval",
+                        mode="agent",
+                        session_id=session_id,
+                        project_path=str(root),
+                        initial_input_kind="prepared_input",
+                        initial_input_payload=[{"role": "user", "content": "Wait for approval"}],
+                    )
+                    approval = PendingApproval(
+                        approval_id=f"approval-{job.job_id}",
+                        tool_name="run_command",
+                        title="Run command",
+                        description="Needs approval",
+                        execution_type="run",
+                        scope_key=f"command:{job.job_id}",
+                        scope_label="Terminal command",
+                        requested_at=1_700_000_000.0,
+                    )
+                    run_id = save_pending_run(
+                        session_id=session_id,
+                        state={"job_id": job.job_id},
+                        approvals=[approval],
+                        run_id=f"run-{job.job_id}",
+                    )
+                    save_session_state(SessionState(session_id=session_id, recent_items=[], total_turns=0))
+                    update_background_job(
+                        job.job_id,
+                        status=BackgroundJobStatus.WAITING_PERMISSION.value,
+                        pending_run_id=run_id,
+                    )
+
+                    with self.subTest(cancels_background=cancels_background):
+                        api = import_api_module()
+                        if cancels_background:
+                            payload = asyncio.run(api.takeover_job_endpoint(job.job_id))
+                        else:
+                            with patch("boss.api.jobs_takeover_cancels_background", return_value=False):
+                                payload = asyncio.run(api.takeover_job_endpoint(job.job_id))
+
+                        current = load_background_job(job.job_id)
+                        self.assertIsNotNone(current)
+                        assert current is not None
+                        self.assertEqual(current.status, BackgroundJobStatus.TAKEN_OVER.value)
+                        self.assertIsNone(current.pending_run_id)
+                        self.assertEqual(payload["job"]["status"], BackgroundJobStatus.TAKEN_OVER.value)
+                        self.assertIsNone(payload["job"]["pending_run_id"])
+                        self.assertIsNone(load_pending_run(run_id))
+                        self.assertFalse((pending_dir / f"{run_id}.json").exists())
 
     def test_git_status_payload_summarizes_clean_repo(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -888,6 +963,72 @@ class RegressionHarnessTests(unittest.TestCase):
                 )
                 self.assertEqual(episodes["preview-update-guard"].updated_at, unchanged_timestamp)
                 self.assertNotIn("preview-create-guard", episodes)
+
+    def test_memory_overview_preview_does_not_touch_last_used_at(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            history_dir = root / "history"
+            db_path = root / "knowledge.sqlite"
+            unchanged_timestamp = "2026-01-01T00:00:00+00:00"
+
+            with isolated_knowledge_store(db_path), override_settings(
+                history_dir=history_dir,
+                auto_memory_enabled=True,
+            ):
+                store = knowledge_module.get_knowledge_store()
+                durable = store.upsert_durable_memory(
+                    memory_kind="workflow",
+                    category="workflow",
+                    key="response_style",
+                    value="Prefer concise technical answers.",
+                    tags=["style"],
+                    source="test",
+                    created_at=unchanged_timestamp,
+                    updated_at=unchanged_timestamp,
+                    last_used_at=unchanged_timestamp,
+                )
+                candidate = store.queue_memory_candidate(
+                    session_id="session-a",
+                    memory_kind="preference",
+                    category="preference",
+                    key="summary_style",
+                    value="Prefer terse daily summaries.",
+                    source="test",
+                )
+                store._conn.execute(
+                    "UPDATE memory_candidates SET last_used_at = ?, updated_at = ? WHERE id = ?",
+                    (unchanged_timestamp, unchanged_timestamp, candidate.id),
+                )
+                store._conn.commit()
+
+                save_session_state(
+                    SessionState(
+                        session_id="session-a",
+                        recent_items=[{"role": "user", "type": "message", "content": "Preview message"}],
+                        total_turns=1,
+                    )
+                )
+
+                api = import_api_module()
+                session_payload = api._memory_overview_payload(
+                    session_id="session-a",
+                    message="Use concise technical answers and terse daily summaries.",
+                )
+                stateless_payload = api._memory_overview_payload(
+                    message="Use concise technical answers.",
+                )
+
+                self.assertGreaterEqual(len(session_payload["current_turn_memory"]["reasons"]), 1)
+                self.assertGreaterEqual(len(stateless_payload["current_turn_memory"]["reasons"]), 1)
+
+                refreshed_durable = store.get_durable_memory(durable.id)
+                refreshed_candidate = store.get_memory_candidate(candidate.id)
+                self.assertIsNotNone(refreshed_durable)
+                self.assertIsNotNone(refreshed_candidate)
+                assert refreshed_durable is not None
+                assert refreshed_candidate is not None
+                self.assertEqual(refreshed_durable.last_used_at, unchanged_timestamp)
+                self.assertEqual(refreshed_candidate.last_used_at, unchanged_timestamp)
 
     def test_persist_result_still_compacts_and_syncs_episode(self):
         with tempfile.TemporaryDirectory() as temp_dir:

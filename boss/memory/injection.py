@@ -23,6 +23,7 @@ def build_memory_injection(
     session_summary: str = "",
     session_id: str | None = None,
     referenced_project_path: str | None = None,
+    read_only: bool = False,
 ) -> MemoryInjection:
     if not is_memory_injection_enabled():
         return MemoryInjection(text="", results=[], project_path=referenced_project_path, query=user_message)
@@ -51,9 +52,16 @@ def build_memory_injection(
         project_path=project_path,
         session_id=session_id,
         kinds=kinds,
+        touch_results=not read_only,
     )
     if project_path and not results:
-        results = store.search_memories(query, limit=limit, session_id=session_id, kinds=kinds)
+        results = store.search_memories(
+            query,
+            limit=limit,
+            session_id=session_id,
+            kinds=kinds,
+            touch_results=not read_only,
+        )
 
     text = _format_injection(results, project_path=project_path)
     return MemoryInjection(text=text, results=results, project_path=project_path, query=query)
