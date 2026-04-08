@@ -1,0 +1,18 @@
+# Repo-scoped Boss access boundaries
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.secret
+secrets.*
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+.venv/
+BossApp/.build/
+DerivedData/

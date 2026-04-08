@@ -53,7 +53,7 @@ final class APIClient: Sendable {
 
     // MARK: - Streaming Chat
 
-    func streamChat(message: String, sessionId: String?) -> AsyncStream<SSEEvent> {
+    func streamChat(message: String, sessionId: String?, mode: WorkMode = .default) -> AsyncStream<SSEEvent> {
         var req = URLRequest(url: URL(string: "\(baseURL)/api/chat")!)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -61,9 +61,10 @@ final class APIClient: Sendable {
         struct Body: Encodable {
             let message: String
             let session_id: String?
+            let mode: String
         }
 
-        req.httpBody = try? JSONEncoder().encode(Body(message: message, session_id: sessionId))
+        req.httpBody = try? JSONEncoder().encode(Body(message: message, session_id: sessionId, mode: mode.rawValue))
         return stream(request: req)
     }
 
@@ -147,6 +148,162 @@ final class APIClient: Sendable {
         )
     }
 
+    func fetchReviewCapabilities(projectPath: String?) async throws -> ReviewCapabilitiesInfo {
+        var items: [URLQueryItem] = []
+        if let projectPath, !projectPath.isEmpty {
+            items.append(URLQueryItem(name: "project_path", value: projectPath))
+        }
+        let data = try await get("/api/review/capabilities", queryItems: items)
+        return try decode(
+            ReviewCapabilitiesInfo.self,
+            from: data,
+            context: "/api/review/capabilities",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func fetchReviewHistory(limit: Int = 30) async throws -> [ReviewRunInfo] {
+        let data = try await get("/api/review/history", queryItems: [
+            URLQueryItem(name: "limit", value: String(limit)),
+        ])
+        return try decode(
+            [ReviewRunInfo].self,
+            from: data,
+            context: "/api/review/history",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func runReview(
+        target: ReviewTargetKind,
+        projectPath: String?,
+        baseRef: String?,
+        headRef: String?,
+        filePaths: [String]
+    ) async throws -> ReviewRunInfo {
+        struct Body: Encodable {
+            let target: String
+            let project_path: String?
+            let base_ref: String?
+            let head_ref: String?
+            let file_paths: [String]
+        }
+
+        let body = try JSONEncoder().encode(
+            Body(
+                target: target.rawValue,
+                project_path: projectPath,
+                base_ref: baseRef,
+                head_ref: headRef,
+                file_paths: filePaths
+            )
+        )
+        let data = try await post("/api/review/run", body: body)
+        return try decode(
+            ReviewRunInfo.self,
+            from: data,
+            context: "/api/review/run",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func fetchJobs(limit: Int = 50) async throws -> [BackgroundJobInfo] {
+        let data = try await get("/api/jobs", queryItems: [
+            URLQueryItem(name: "limit", value: String(limit)),
+        ])
+        return try decode(
+            [BackgroundJobInfo].self,
+            from: data,
+            context: "/api/jobs",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func fetchJob(jobId: String) async throws -> BackgroundJobInfo {
+        let data = try await get("/api/jobs/\(jobId)")
+        return try decode(
+            BackgroundJobInfo.self,
+            from: data,
+            context: "/api/jobs/\(jobId)",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func launchBackgroundJob(
+        message: String,
+        sessionId: String?,
+        mode: WorkMode,
+        projectPath: String?,
+        branchMode: String? = nil
+    ) async throws -> BackgroundJobInfo {
+        struct Body: Encodable {
+            let message: String
+            let session_id: String?
+            let mode: String
+            let project_path: String?
+            let branch_mode: String?
+        }
+
+        let body = try JSONEncoder().encode(
+            Body(
+                message: message,
+                session_id: sessionId,
+                mode: mode.rawValue,
+                project_path: projectPath,
+                branch_mode: branchMode
+            )
+        )
+        let data = try await post("/api/jobs", body: body)
+        return try decode(
+            BackgroundJobInfo.self,
+            from: data,
+            context: "/api/jobs",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func fetchJobLog(jobId: String, limit: Int = 200) async throws -> BackgroundJobLogTailInfo {
+        let data = try await get("/api/jobs/\(jobId)/logs", queryItems: [
+            URLQueryItem(name: "limit", value: String(limit)),
+        ])
+        return try decode(
+            BackgroundJobLogTailInfo.self,
+            from: data,
+            context: "/api/jobs/\(jobId)/logs",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func cancelJob(jobId: String) async throws -> BackgroundJobInfo {
+        let data = try await post("/api/jobs/\(jobId)/cancel", body: nil)
+        return try decode(
+            BackgroundJobInfo.self,
+            from: data,
+            context: "/api/jobs/\(jobId)/cancel",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func resumeJob(jobId: String) async throws -> BackgroundJobInfo {
+        let data = try await post("/api/jobs/\(jobId)/resume", body: nil)
+        return try decode(
+            BackgroundJobInfo.self,
+            from: data,
+            context: "/api/jobs/\(jobId)/resume",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
+    func takeOverJob(jobId: String) async throws -> BackgroundJobTakeoverInfo {
+        let data = try await post("/api/jobs/\(jobId)/takeover", body: nil)
+        return try decode(
+            BackgroundJobTakeoverInfo.self,
+            from: data,
+            context: "/api/jobs/\(jobId)/takeover",
+            dateDecodingStrategy: .iso8601
+        )
+    }
+
     func revokePermission(tool: String, scopeKey: String) async throws {
         _ = try await delete("/api/permissions", queryItems: [
             URLQueryItem(name: "tool", value: tool),
@@ -156,6 +313,48 @@ final class APIClient: Sendable {
 
     func deleteMemoryItem(sourceTable: String, itemId: Int) async throws {
         _ = try await delete("/api/memory/items/\(sourceTable)/\(itemId)")
+    }
+
+    func updateMemoryCandidate(candidateId: Int, label: String, text: String, evidence: String?) async throws {
+        struct Body: Encodable {
+            let key: String
+            let value: String
+            let evidence: String?
+        }
+
+        let body = try JSONEncoder().encode(Body(key: label, value: text, evidence: evidence))
+        _ = try await patch("/api/memory/candidates/\(candidateId)", body: body)
+    }
+
+    func approveMemoryCandidate(
+        candidateId: Int,
+        label: String,
+        text: String,
+        evidence: String?,
+        pin: Bool = false
+    ) async throws {
+        struct Body: Encodable {
+            let key: String
+            let value: String
+            let evidence: String?
+            let pin: Bool
+        }
+
+        let body = try JSONEncoder().encode(Body(key: label, value: text, evidence: evidence, pin: pin))
+        _ = try await post("/api/memory/candidates/\(candidateId)/approve", body: body)
+    }
+
+    func rejectMemoryCandidate(candidateId: Int) async throws {
+        _ = try await post("/api/memory/candidates/\(candidateId)/reject", body: nil)
+    }
+
+    func expireMemoryCandidate(candidateId: Int) async throws {
+        _ = try await post("/api/memory/candidates/\(candidateId)/expire", body: nil)
+    }
+
+    func setMemoryPinned(itemId: Int, pinned: Bool) async throws {
+        let action = pinned ? "pin" : "unpin"
+        _ = try await post("/api/memory/items/durable_memories/\(itemId)/\(action)", body: nil)
     }
 
     func triggerScan() async throws -> [String: Any] {
@@ -171,6 +370,10 @@ final class APIClient: Sendable {
 
     private func post(_ path: String, body: Data?) async throws -> Data {
         try await request(method: "POST", path: path, body: body)
+    }
+
+    private func patch(_ path: String, body: Data?) async throws -> Data {
+        try await request(method: "PATCH", path: path, body: body)
     }
 
     private func delete(_ path: String, queryItems: [URLQueryItem] = []) async throws -> Data {

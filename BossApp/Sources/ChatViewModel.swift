@@ -11,6 +11,8 @@ final class ChatViewModel: ObservableObject {
     @Published var activeToolName: String?
     @Published var pendingPermissionCount: Int = 0
     @Published var sessionId: String = UUID().uuidString
+    @Published var selectedMode: WorkMode = .default
+    @Published var draftAttachments: [AttachmentItem] = []
     @Published var selectedSurface: AppSurface = .chat
     @Published var selectedProjectPath: String?
 
@@ -19,9 +21,26 @@ final class ChatViewModel: ObservableObject {
     @Published var facts: [FactInfo] = []
     @Published var memoryStats: MemoryStats?
     @Published var memoryOverview: MemoryOverview?
+    @Published var systemStatus: SystemStatusInfo?
+    @Published var jobs: [BackgroundJobInfo] = []
+    @Published var selectedJob: BackgroundJobInfo?
+    @Published var selectedJobLog: BackgroundJobLogTailInfo?
+    @Published var reviewCapabilities: ReviewCapabilitiesInfo?
+    @Published var reviewHistory: [ReviewRunInfo] = []
+    @Published var selectedReviewRun: ReviewRunInfo?
+    @Published var selectedReviewProjectPath: String?
+    @Published var selectedReviewTarget: ReviewTargetKind = .auto
+    @Published var reviewBaseRef: String = ""
+    @Published var reviewHeadRef: String = ""
+    @Published var reviewFilePathsText: String = ""
+    @Published var isLaunchingBackgroundJob: Bool = false
+    @Published var isRunningReview: Bool = false
     @Published var permissions: [PermissionEntry] = []
     @Published var sidebarRefreshError: String?
     @Published var memoryRefreshError: String?
+    @Published var diagnosticsRefreshError: String?
+    @Published var jobsRefreshError: String?
+    @Published var reviewRefreshError: String?
     @Published var permissionsRefreshError: String?
     @Published var startupIssue: String?
 
@@ -36,11 +55,14 @@ final class ChatViewModel: ObservableObject {
 
     func send() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isLoading else { return }
+        let attachments = draftAttachments
+        let requestText = requestMessage(text: text, attachments: attachments)
+        guard !requestText.isEmpty, !isLoading else { return }
 
         inputText = ""
+        draftAttachments = []
         selectedSurface = .chat
-        messages.append(ChatMessage(role: .user, content: text))
+        messages.append(ChatMessage(role: .user, content: text, attachments: attachments))
 
         let assistantMsg = ChatMessage(role: .assistant, content: "", agent: AgentInfo.entryAgentName, isStreaming: true)
         messages.append(assistantMsg)
@@ -53,10 +75,24 @@ final class ChatViewModel: ObservableObject {
                 return
             }
             await consumeStream(
-                api.streamChat(message: text, sessionId: sessionId),
+                api.streamChat(message: requestText, sessionId: sessionId, mode: selectedMode),
                 for: assistantMsg.id
             )
         }
+    }
+
+    func addAttachments(_ urls: [URL]) {
+        for url in urls {
+            let candidate = AttachmentItem(url: url)
+            if draftAttachments.contains(where: { $0.path == candidate.path }) {
+                continue
+            }
+            draftAttachments.append(candidate)
+        }
+    }
+
+    func removeDraftAttachment(_ attachmentId: UUID) {
+        draftAttachments.removeAll { $0.id == attachmentId }
     }
 
     func respondToPermission(
@@ -364,6 +400,74 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func refreshDiagnosticsSurface() async {
+        do {
+            systemStatus = try await api.fetchSystemStatus()
+            diagnosticsRefreshError = nil
+        } catch {
+            diagnosticsRefreshError = "Diagnostics refresh failed. \(errorMessage(error))"
+        }
+    }
+
+    func refreshReviewSurface() async {
+        let requestedProjectPath = selectedReviewProjectPath ?? selectedProjectPath
+        var failures: [String] = []
+
+        do {
+            let capabilities = try await api.fetchReviewCapabilities(projectPath: requestedProjectPath)
+            reviewCapabilities = capabilities
+            if selectedReviewProjectPath == nil || selectedReviewProjectPath?.isEmpty == true {
+                selectedReviewProjectPath = capabilities.projectPath
+            }
+            if selectedReviewTarget != .auto,
+                      !capabilities.availableTargets.contains(selectedReviewTarget.rawValue),
+                      let fallback = ReviewTargetKind(rawValue: capabilities.defaultTarget) {
+                selectedReviewTarget = fallback
+            }
+        } catch {
+            failures.append("Review capabilities unavailable: \(errorMessage(error))")
+        }
+
+        do {
+            reviewHistory = try await api.fetchReviewHistory(limit: 30)
+            if let current = selectedReviewRun,
+               let refreshed = reviewHistory.first(where: { $0.reviewId == current.reviewId }) {
+                selectedReviewRun = refreshed
+            } else if selectedReviewRun == nil {
+                selectedReviewRun = reviewHistory.first
+            }
+        } catch {
+            failures.append("Review history unavailable: \(errorMessage(error))")
+        }
+
+        if failures.isEmpty {
+            reviewRefreshError = nil
+        } else {
+            reviewRefreshError = failures.joined(separator: "  ")
+        }
+    }
+
+    func refreshJobsSurface() async {
+        do {
+            jobs = try await api.fetchJobs(limit: 80)
+            if let current = selectedJob,
+               let refreshed = jobs.first(where: { $0.jobId == current.jobId }) {
+                selectedJob = refreshed
+                selectedJobLog = try? await api.fetchJobLog(jobId: refreshed.jobId, limit: 240)
+            } else if selectedJob == nil {
+                selectedJob = jobs.first
+                if let first = selectedJob {
+                    selectedJobLog = try? await api.fetchJobLog(jobId: first.jobId, limit: 240)
+                } else {
+                    selectedJobLog = nil
+                }
+            }
+            jobsRefreshError = nil
+        } catch {
+            jobsRefreshError = "Jobs refresh failed. \(errorMessage(error))"
+        }
+    }
+
     func showChat() {
         selectedSurface = .chat
     }
@@ -374,9 +478,165 @@ final class ChatViewModel: ObservableObject {
         Task { await refreshMemoryOverview() }
     }
 
+    func showDiagnostics() {
+        selectedSurface = .diagnostics
+        Task { await refreshDiagnosticsSurface() }
+    }
+
+    func showJobs() {
+        selectedSurface = .jobs
+        Task { await refreshJobsSurface() }
+    }
+
     func showPermissions() {
         selectedSurface = .permissions
         Task { await refreshPermissions() }
+    }
+
+    func showReview(projectPath: String? = nil) {
+        if let projectPath {
+            selectedReviewProjectPath = projectPath
+        } else if selectedReviewProjectPath == nil {
+            selectedReviewProjectPath = selectedProjectPath
+        }
+        selectedSurface = .review
+        Task { await refreshReviewSurface() }
+    }
+
+    func selectReviewTarget(_ target: ReviewTargetKind) {
+        selectedReviewTarget = target
+    }
+
+    func selectReviewRun(_ run: ReviewRunInfo) {
+        selectedReviewRun = run
+    }
+
+    func selectJob(_ job: BackgroundJobInfo) {
+        selectedJob = job
+        Task {
+            do {
+                selectedJobLog = try await api.fetchJobLog(jobId: job.jobId, limit: 240)
+                jobsRefreshError = nil
+            } catch {
+                jobsRefreshError = "Couldn't load job log. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func launchBackgroundJob() {
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachments = draftAttachments
+        let requestText = requestMessage(text: text, attachments: attachments)
+        guard !requestText.isEmpty, !isLaunchingBackgroundJob else { return }
+
+        isLaunchingBackgroundJob = true
+        jobsRefreshError = nil
+
+        let jobSessionId = sessionId
+        let mode = selectedMode
+        let projectPath = selectedProjectPath
+
+        Task {
+            guard await ensureBackendReadyForBackgroundAction() else {
+                isLaunchingBackgroundJob = false
+                return
+            }
+
+            do {
+                let job = try await api.launchBackgroundJob(
+                    message: requestText,
+                    sessionId: jobSessionId,
+                    mode: mode,
+                    projectPath: projectPath
+                )
+                inputText = ""
+                draftAttachments = []
+                selectedSurface = .jobs
+                jobs.removeAll { $0.jobId == job.jobId }
+                jobs.insert(job, at: 0)
+                selectedJob = job
+                selectedJobLog = try? await api.fetchJobLog(jobId: job.jobId, limit: 240)
+                jobsRefreshError = nil
+                await refreshJobsSurface()
+            } catch {
+                jobsRefreshError = "Couldn't launch background job. \(errorMessage(error))"
+            }
+            isLaunchingBackgroundJob = false
+        }
+    }
+
+    func cancelJob(_ job: BackgroundJobInfo) {
+        Task {
+            do {
+                let updated = try await api.cancelJob(jobId: job.jobId)
+                replaceJob(updated)
+                selectedJob = updated
+                selectedJobLog = try? await api.fetchJobLog(jobId: updated.jobId, limit: 240)
+                jobsRefreshError = nil
+            } catch {
+                jobsRefreshError = "Couldn't cancel background job. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func resumeJob(_ job: BackgroundJobInfo) {
+        Task {
+            do {
+                let updated = try await api.resumeJob(jobId: job.jobId)
+                replaceJob(updated)
+                selectedJob = updated
+                selectedJobLog = try? await api.fetchJobLog(jobId: updated.jobId, limit: 240)
+                jobsRefreshError = nil
+            } catch {
+                jobsRefreshError = "Couldn't resume background job. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func takeOverJob(_ job: BackgroundJobInfo) {
+        Task {
+            do {
+                let takeover = try await api.takeOverJob(jobId: job.jobId)
+                applyJobTakeover(takeover)
+                jobsRefreshError = nil
+                await refreshJobsSurface()
+            } catch {
+                jobsRefreshError = "Couldn't take over background job. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func runReview() {
+        guard !isRunningReview else { return }
+        isRunningReview = true
+        reviewRefreshError = nil
+        selectedSurface = .review
+
+        let target = selectedReviewTarget
+        let projectPath = normalizedReviewValue(selectedReviewProjectPath)
+        let baseRef = normalizedReviewValue(reviewBaseRef)
+        let headRef = normalizedReviewValue(reviewHeadRef)
+        let filePaths = parsedReviewFilePaths()
+
+        Task {
+            do {
+                let result = try await api.runReview(
+                    target: target,
+                    projectPath: projectPath,
+                    baseRef: baseRef,
+                    headRef: headRef,
+                    filePaths: filePaths
+                )
+                reviewHistory.removeAll { $0.reviewId == result.reviewId }
+                reviewHistory.insert(result, at: 0)
+                selectedReviewRun = result
+                reviewRefreshError = nil
+                await refreshReviewSurface()
+            } catch {
+                reviewRefreshError = "Review failed. \(errorMessage(error))"
+            }
+            isRunningReview = false
+        }
     }
 
     func revokePermission(_ entry: PermissionEntry) {
@@ -406,6 +666,78 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    func saveMemoryCandidate(candidateId: Int, label: String, text: String, evidence: String?) {
+        Task {
+            do {
+                try await api.updateMemoryCandidate(candidateId: candidateId, label: label, text: text, evidence: evidence)
+                memoryRefreshError = nil
+                await refreshSidebar()
+            } catch {
+                memoryRefreshError = "Couldn't update pending memory. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func approveMemoryCandidate(
+        candidateId: Int,
+        label: String,
+        text: String,
+        evidence: String?,
+        pin: Bool = false
+    ) {
+        Task {
+            do {
+                try await api.approveMemoryCandidate(
+                    candidateId: candidateId,
+                    label: label,
+                    text: text,
+                    evidence: evidence,
+                    pin: pin
+                )
+                memoryRefreshError = nil
+                await refreshSidebar()
+            } catch {
+                memoryRefreshError = "Couldn't approve memory. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func rejectMemoryCandidate(candidateId: Int) {
+        Task {
+            do {
+                try await api.rejectMemoryCandidate(candidateId: candidateId)
+                memoryRefreshError = nil
+                await refreshSidebar()
+            } catch {
+                memoryRefreshError = "Couldn't reject memory. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func expireMemoryCandidate(candidateId: Int) {
+        Task {
+            do {
+                try await api.expireMemoryCandidate(candidateId: candidateId)
+                memoryRefreshError = nil
+                await refreshSidebar()
+            } catch {
+                memoryRefreshError = "Couldn't expire memory. \(errorMessage(error))"
+            }
+        }
+    }
+
+    func setMemoryPinned(itemId: Int, pinned: Bool) {
+        Task {
+            do {
+                try await api.setMemoryPinned(itemId: itemId, pinned: pinned)
+                memoryRefreshError = nil
+                await refreshSidebar()
+            } catch {
+                memoryRefreshError = "Couldn't update pin state. \(errorMessage(error))"
+            }
+        }
+    }
+
     func newSession() {
         messages = [ChatMessage(role: .system, content: "New session started.")]
         sessionId = UUID().uuidString
@@ -413,13 +745,93 @@ final class ChatViewModel: ObservableObject {
         activeToolName = nil
         isLoading = false
         currentAgent = AgentInfo.entryAgentName
+        draftAttachments = []
         selectedProjectPath = nil
+        selectedReviewProjectPath = nil
         memoryOverview = nil
+        reviewCapabilities = nil
+        reviewHistory = []
+        selectedReviewRun = nil
         sidebarRefreshError = nil
         memoryRefreshError = nil
+        diagnosticsRefreshError = nil
+        reviewRefreshError = nil
         permissionsRefreshError = nil
         selectedSurface = .chat
         Task { await refreshSidebar() }
+    }
+
+    func selectMode(_ mode: WorkMode) {
+        selectedMode = mode
+    }
+
+    private func requestMessage(text: String, attachments: [AttachmentItem]) -> String {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachmentContext = serializedAttachmentContext(attachments)
+
+        if trimmedText.isEmpty {
+            return attachmentContext
+        }
+        if attachmentContext.isEmpty {
+            return trimmedText
+        }
+        return "\(trimmedText)\n\n\(attachmentContext)"
+    }
+
+    private func serializedAttachmentContext(_ attachments: [AttachmentItem]) -> String {
+        guard !attachments.isEmpty else {
+            return ""
+        }
+
+        var lines = ["Attached local files:"]
+        var previewBudget = 24_000
+
+        for attachment in attachments {
+            lines.append("- \(attachment.displayName): \(attachment.path)")
+
+            guard attachment.isPreviewableText,
+                  previewBudget > 0,
+                  let preview = textPreview(for: attachment, maxCharacters: min(8_000, previewBudget)) else {
+                continue
+            }
+
+            lines.append("Contents of \(attachment.displayName):")
+            lines.append("```text")
+            lines.append(preview)
+            lines.append("```")
+            previewBudget -= preview.count
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func textPreview(for attachment: AttachmentItem, maxCharacters: Int) -> String? {
+        guard maxCharacters > 0 else {
+            return nil
+        }
+
+        guard let values = try? attachment.url.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize,
+              fileSize > 0,
+              fileSize <= 16_384 else {
+            return nil
+        }
+
+        guard let data = try? Data(contentsOf: attachment.url, options: .mappedIfSafe),
+              !data.contains(0),
+              let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else {
+            return nil
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        if trimmed.count <= maxCharacters {
+            return trimmed
+        }
+        return String(trimmed.prefix(maxCharacters)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n...[truncated]"
     }
 
     func scanSystem(showChat: Bool = false) {
@@ -460,7 +872,23 @@ final class ChatViewModel: ObservableObject {
         }
 
         await refreshSidebar()
+        await refreshDiagnosticsSurface()
         await refreshPermissions()
+    }
+
+    private func ensureBackendReadyForBackgroundAction() async -> Bool {
+        let bootstrap = await LocalBackendBootstrapper.shared.ensureBackendReady(api: api)
+        switch bootstrap {
+        case .ready, .started:
+            startupIssue = nil
+            return true
+        case .warning(let message):
+            startupIssue = message
+            return true
+        case .failure(let message):
+            startupIssue = message
+            return false
+        }
     }
 
     private func ensureBackendReadyForUserAction(messageId: UUID) async -> Bool {
@@ -505,6 +933,44 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func applyJobTakeover(_ takeover: BackgroundJobTakeoverInfo) {
+        sessionId = takeover.sessionId
+        selectedMode = WorkMode(rawValue: takeover.mode) ?? .default
+        selectedProjectPath = takeover.projectPath
+        messages = takeover.messages.map(chatMessage(from:))
+        if messages.isEmpty {
+            messages = [ChatMessage(role: .system, content: "Background job ready in foreground chat.")]
+        }
+        selectedSurface = .chat
+        isLoading = false
+        activeToolName = nil
+        pendingPermissionCount = 0
+        currentAgent = AgentInfo.entryAgentName
+    }
+
+    private func replaceJob(_ updated: BackgroundJobInfo) {
+        if let index = jobs.firstIndex(where: { $0.jobId == updated.jobId }) {
+            jobs[index] = updated
+        } else {
+            jobs.insert(updated, at: 0)
+        }
+    }
+
+    private func chatMessage(from info: SessionMessageInfo) -> ChatMessage {
+        let role: ChatMessage.Role
+        switch info.role.lowercased() {
+        case "user":
+            role = .user
+        case "assistant":
+            role = .assistant
+        case "error":
+            role = .error
+        default:
+            role = .system
+        }
+        return ChatMessage(role: role, content: info.content)
+    }
+
     private func errorMessage(_ error: Error) -> String {
         if let apiError = error as? APIError {
             return apiError.userMessage
@@ -523,5 +989,18 @@ final class ChatViewModel: ObservableObject {
         }
 
         return messages.last(where: { $0.role == .user })?.content
+    }
+
+    private func parsedReviewFilePaths() -> [String] {
+        reviewFilePathsText
+            .split(whereSeparator: { $0 == "\n" || $0 == "," })
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func normalizedReviewValue(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

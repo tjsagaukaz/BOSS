@@ -1,0 +1,264 @@
+import SwiftUI
+
+struct DiagnosticsView: View {
+    @EnvironmentObject var vm: ChatViewModel
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 24) {
+                header
+                    .padding(.top, 80)
+
+                if let message = vm.diagnosticsRefreshError {
+                    InlineStatusBanner(message: message)
+                }
+
+                if let status = vm.systemStatus {
+                    overviewCard(status)
+                    repoCard(status)
+                    runtimeCard(status)
+                    bossControlCard(status)
+                } else {
+                    emptyState
+                }
+            }
+            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.bottom, 32)
+        }
+        .task {
+            await vm.refreshDiagnosticsSurface()
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Diagnostics")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(BossColor.textPrimary)
+
+                Text("High-signal local health for the repo, runtime, and Boss control files")
+                    .font(.system(size: 13))
+                    .foregroundColor(Color.white.opacity(0.38))
+            }
+
+            Spacer()
+
+            Button(action: { Task { await vm.refreshDiagnosticsSurface() } }) {
+                Text("Refresh")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.white.opacity(0.64))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func overviewCard(_ status: SystemStatusInfo) -> some View {
+        let diagnostics = status.diagnostics
+        return card {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Overview")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.9))
+
+                HStack(spacing: 24) {
+                    metric(label: "Active Mode", value: vm.selectedMode.label)
+                    metric(label: "Provider", value: status.providerMode ?? diagnostics?.providerMode ?? "unknown")
+                    metric(label: "Pending Memory", value: "\(diagnostics?.pendingMemoryCount ?? 0)")
+                    metric(label: "Pending Jobs", value: "\(diagnostics?.pendingJobsCount ?? status.backgroundJobsCount ?? 0)")
+                    metric(label: "Pending Runs", value: "\(diagnostics?.pendingRunsCount ?? status.pendingRunsCount ?? 0)")
+                }
+            }
+        }
+    }
+
+    private func repoCard(_ status: SystemStatusInfo) -> some View {
+        let git = status.git
+        let diagnostics = status.diagnostics
+        return card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Repository")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.9))
+
+                    statusBadge((diagnostics?.repoClean ?? git?.clean) == true ? "Clean" : "Needs attention")
+                }
+
+                Text(git?.summary ?? diagnostics?.gitSummary ?? "Git summary unavailable.")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.white.opacity(0.58))
+
+                if let repoRoot = git?.repoRoot {
+                    metadataLine(label: "Repo Root", value: repoRoot)
+                }
+                if let branch = git?.branch ?? git?.branchSummary {
+                    metadataLine(label: "Branch", value: branch)
+                }
+            }
+        }
+    }
+
+    private func runtimeCard(_ status: SystemStatusInfo) -> some View {
+        let diagnostics = status.diagnostics
+        let warnings = diagnostics?.statusWarnings ?? status.runtimeTrust?.warnings ?? []
+        let consistent = diagnostics?.lockConsistent ?? false
+
+        return card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Runtime")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.9))
+
+                    statusBadge(consistent ? "Consistent" : "Check lock")
+                }
+
+                if let workspacePath = status.workspacePath {
+                    metadataLine(label: "Workspace", value: workspacePath)
+                }
+                if let interpreterPath = status.interpreterPath {
+                    metadataLine(label: "Interpreter", value: interpreterPath)
+                }
+                if let readyAt = status.readyAt {
+                    metadataLine(label: "Ready", value: relativeDate(readyAt))
+                }
+                if let buildMarker = status.buildMarker {
+                    metadataLine(label: "Build", value: buildMarker)
+                }
+
+                if warnings.isEmpty {
+                    Text("No runtime trust warnings.")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.42))
+                } else {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("WARNINGS")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(Color.white.opacity(0.28))
+                            .tracking(1.0)
+                        ForEach(warnings, id: \.self) { warning in
+                            Text(warning)
+                                .font(.system(size: 12))
+                                .foregroundColor(Color.white.opacity(0.58))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func bossControlCard(_ status: SystemStatusInfo) -> some View {
+        let health = status.bossControlHealth
+        let files = status.bossControl?.files ?? [:]
+        return card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("Boss Control")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.9))
+
+                    statusBadge((health?.healthy ?? false) ? "Healthy" : "Incomplete")
+                }
+
+                metadataLine(label: "Default Mode", value: health?.defaultMode ?? status.bossControl?.defaultMode ?? "unknown")
+                metadataLine(label: "Review Mode", value: health?.reviewModeName ?? status.bossControl?.reviewModeName ?? "review")
+                metadataLine(label: "Rules", value: "\(health?.rulesCount ?? status.bossControl?.rules?.count ?? 0)")
+
+                controlFileRow(label: "BOSS.md", file: files["BOSS.md"])
+                controlFileRow(label: ".boss/config.toml", file: files["config"])
+
+                if let missing = health?.missingFiles, !missing.isEmpty {
+                    metadataLine(label: "Missing", value: missing.joined(separator: ", "))
+                }
+            }
+        }
+    }
+
+    private func controlFileRow(label: String, file: BossControlFileStatusInfo?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.82))
+
+            statusBadge((file?.exists ?? false) ? "Present" : "Missing")
+
+            Spacer()
+
+            if let path = file?.path {
+                Text(path)
+                    .font(.system(size: 11))
+                    .foregroundColor(Color.white.opacity(0.34))
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private func metric(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.88))
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundColor(Color.white.opacity(0.32))
+        }
+    }
+
+    private func metadataLine(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(Color.white.opacity(0.28))
+                .tracking(1.0)
+            Text(value)
+                .font(.system(size: 12))
+                .foregroundColor(Color.white.opacity(0.58))
+                .textSelection(.enabled)
+        }
+    }
+
+    private func statusBadge(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+            )
+    }
+
+    private func card<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
+            .padding(16)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.white.opacity(0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            )
+    }
+
+    private var emptyState: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Loading diagnostics")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.82))
+
+            Text("Boss is fetching runtime, git, and control health information.")
+                .font(.system(size: 13))
+                .foregroundColor(Color.white.opacity(0.34))
+        }
+    }
+
+    private func relativeDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}

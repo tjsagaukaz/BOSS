@@ -32,6 +32,12 @@ struct ContentView: View {
             ChatView()
         case .memory:
             MemoryView()
+        case .diagnostics:
+            DiagnosticsView()
+        case .jobs:
+            JobsView()
+        case .review:
+            ReviewView()
         case .permissions:
             PermissionsView()
         }
@@ -73,6 +79,24 @@ struct SidebarView: View {
 
             sidebarNavRow("Memory", selected: vm.selectedSurface == .memory) {
                 vm.showMemory()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            sidebarNavRow("Diagnostics", selected: vm.selectedSurface == .diagnostics) {
+                vm.showDiagnostics()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            sidebarNavRow("Jobs", selected: vm.selectedSurface == .jobs) {
+                vm.showJobs()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            sidebarNavRow("Review", selected: vm.selectedSurface == .review) {
+                vm.showReview()
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 4)

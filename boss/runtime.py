@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from boss.config import settings
+from boss.control import boss_control_status_payload
 
 
 _LOCK_HELD = False
@@ -150,6 +151,90 @@ def dependency_availability() -> dict[str, dict[str, Any]]:
     }
 
 
+def git_status_payload(root: Path | None = None) -> dict[str, Any]:
+    root = root or workspace_root()
+    git_binary = shutil.which("git")
+    if git_binary is None:
+        return {
+            "available": False,
+            "is_repo": False,
+            "repo_root": None,
+            "branch": None,
+            "branch_summary": None,
+            "clean": None,
+            "staged_count": 0,
+            "unstaged_count": 0,
+            "untracked_count": 0,
+            "changed_file_count": 0,
+            "summary": "git is not available on PATH.",
+        }
+
+    repo_root_text = _git_output(root, ["rev-parse", "--show-toplevel"])
+    if not repo_root_text:
+        return {
+            "available": True,
+            "is_repo": False,
+            "repo_root": None,
+            "branch": None,
+            "branch_summary": None,
+            "clean": None,
+            "staged_count": 0,
+            "unstaged_count": 0,
+            "untracked_count": 0,
+            "changed_file_count": 0,
+            "summary": "Workspace is not inside a git repository.",
+        }
+
+    repo_root = Path(repo_root_text).resolve(strict=False)
+    status_output = _git_output(repo_root, ["status", "--short", "--branch"]) or ""
+    lines = status_output.splitlines()
+    branch_summary = lines[0][3:].strip() if lines and lines[0].startswith("## ") else None
+    branch = _git_output(repo_root, ["branch", "--show-current"]) or None
+
+    staged_count = 0
+    unstaged_count = 0
+    untracked_count = 0
+    changed_file_count = 0
+    for line in lines[1:] if branch_summary is not None else lines:
+        if not line:
+            continue
+        changed_file_count += 1
+        if line.startswith("??"):
+            untracked_count += 1
+            continue
+        code = line[:2]
+        if len(code) == 2 and code[0] != " ":
+            staged_count += 1
+        if len(code) == 2 and code[1] != " ":
+            unstaged_count += 1
+
+    clean = changed_file_count == 0
+    summary_parts = [branch or branch_summary or repo_root.name]
+    if clean:
+        summary_parts.append("clean")
+    else:
+        if staged_count:
+            summary_parts.append(f"{staged_count} staged")
+        if unstaged_count:
+            summary_parts.append(f"{unstaged_count} unstaged")
+        if untracked_count:
+            summary_parts.append(f"{untracked_count} untracked")
+
+    return {
+        "available": True,
+        "is_repo": True,
+        "repo_root": str(repo_root),
+        "branch": branch,
+        "branch_summary": branch_summary,
+        "clean": clean,
+        "staged_count": staged_count,
+        "unstaged_count": unstaged_count,
+        "untracked_count": untracked_count,
+        "changed_file_count": changed_file_count,
+        "summary": " | ".join(summary_parts),
+    }
+
+
 def runtime_trust_report() -> dict[str, Any]:
     lock = read_api_lock_file()
     lock_pid = _coerce_int(lock.get("pid")) if lock else None
@@ -217,8 +302,27 @@ def runtime_status_payload() -> dict[str, Any]:
         "current_working_directory": str(Path.cwd()),
         "app_version": lock.get("app_version") or app_version(),
         "build_marker": lock.get("build_marker") or build_marker(),
+        "git": git_status_payload(workspace_root()),
         "runtime_trust": runtime_trust_report(),
+        "boss_control": boss_control_status_payload(workspace_root()),
     }
+
+
+def _git_output(cwd: Path, args: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
 
 
 def _package_info(name: str) -> dict[str, Any]:

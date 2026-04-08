@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from boss.config import settings
+from boss.control import is_memory_injection_enabled
 from boss.memory.knowledge import MemorySearchResult, get_knowledge_store
 
 
@@ -20,9 +21,10 @@ def build_memory_injection(
     *,
     user_message: str,
     session_summary: str = "",
+    session_id: str | None = None,
     referenced_project_path: str | None = None,
 ) -> MemoryInjection:
-    if not settings.auto_memory_enabled:
+    if not is_memory_injection_enabled():
         return MemoryInjection(text="", results=[], project_path=referenced_project_path, query=user_message)
 
     store = get_knowledge_store()
@@ -43,9 +45,15 @@ def build_memory_injection(
         "session_summary",
     }
 
-    results = store.search_memories(query, limit=limit, project_path=project_path, kinds=kinds)
+    results = store.search_memories(
+        query,
+        limit=limit,
+        project_path=project_path,
+        session_id=session_id,
+        kinds=kinds,
+    )
     if project_path and not results:
-        results = store.search_memories(query, limit=limit, kinds=kinds)
+        results = store.search_memories(query, limit=limit, session_id=session_id, kinds=kinds)
 
     text = _format_injection(results, project_path=project_path)
     return MemoryInjection(text=text, results=results, project_path=project_path, query=query)

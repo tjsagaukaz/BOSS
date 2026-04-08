@@ -88,6 +88,9 @@ class Settings:
         general_model,
     )
     permissions_file: Path = Path(os.getenv("BOSS_PERMISSIONS_FILE", app_data_dir / "permissions.json"))
+    review_history_dir: Path = Path(os.getenv("BOSS_REVIEW_HISTORY_DIR", app_data_dir / "reviews"))
+    jobs_dir: Path = Path(os.getenv("BOSS_JOBS_DIR", app_data_dir / "jobs"))
+    job_logs_dir: Path = Path(os.getenv("BOSS_JOB_LOGS_DIR", app_data_dir / "job-logs"))
     pending_runs_dir: Path = Path(os.getenv("BOSS_PENDING_RUNS_DIR", app_data_dir / "pending_runs"))
     pending_run_expiration_seconds: int = max(
         300,

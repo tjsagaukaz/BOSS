@@ -88,6 +88,7 @@ class PendingRun:
     state: dict[str, Any]
     approvals: list[PendingApproval]
     updated_at: float
+    mode: str | None = None
     status: str = PendingStatus.PENDING.value
     expires_at: float | None = None
     expired_at: float | None = None
@@ -567,6 +568,7 @@ def _expired_record(record: PendingRun, *, expired_at: float | None = None) -> P
         state=record.state,
         approvals=approvals,
         updated_at=record.updated_at,
+        mode=record.mode,
         status=PendingStatus.EXPIRED.value,
         expires_at=record.expires_at if record.expires_at is not None else _expiry_deadline(record.updated_at),
         expired_at=expired_at,
@@ -632,6 +634,7 @@ def save_pending_run(
     state: dict[str, Any],
     approvals: list[PendingApproval],
     run_id: str | None = None,
+    mode: str | None = None,
 ) -> str:
     run_id = run_id or uuid.uuid4().hex
     settings.pending_runs_dir.mkdir(parents=True, exist_ok=True)
@@ -659,6 +662,7 @@ def save_pending_run(
         state=state,
         approvals=hydrated_approvals,
         updated_at=now,
+        mode=mode,
         status=PendingStatus.PENDING.value,
         expires_at=expires_at,
         expired_at=None,
@@ -685,6 +689,7 @@ def _pending_run_from_payload(payload: dict[str, Any]) -> PendingRun | None:
             state=payload["state"],
             approvals=approvals,
             updated_at=updated_at,
+            mode=payload.get("mode"),
             status=payload.get("status", PendingStatus.PENDING.value),
             expires_at=float(expires_at) if expires_at is not None else _expiry_deadline(updated_at),
             expired_at=float(expired_at) if expired_at is not None else None,
@@ -735,11 +740,6 @@ def stale_pending_run_count() -> int:
     if not archive_dir.exists():
         return 0
     return sum(1 for _ in archive_dir.glob("*.json"))
-
-
-def pending_run_counts() -> tuple[int, int]:
-    records = list_pending_runs()
-    return len(records), sum(len(record.approvals) for record in records)
 
 
 def pending_run_metrics() -> tuple[int, int, int]:

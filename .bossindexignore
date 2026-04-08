@@ -1,0 +1,23 @@
+# Repo-scoped Boss indexing exclusions
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.secret
+secrets.*
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+BossApp/.build/
+DerivedData/
+.boss/

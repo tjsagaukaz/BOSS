@@ -37,7 +37,78 @@ enum BossColor {
 enum AppSurface: Equatable {
     case chat
     case memory
+    case diagnostics
+    case jobs
+    case review
     case permissions
+}
+
+enum WorkMode: String, CaseIterable, Codable, Equatable {
+    case ask
+    case plan
+    case agent
+    case review
+
+    static let `default`: WorkMode = .agent
+
+    var label: String {
+        switch self {
+        case .ask: return "Ask"
+        case .plan: return "Plan"
+        case .agent: return "Agent"
+        case .review: return "Review"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .ask:
+            return "Read/search only"
+        case .plan:
+            return "Structured plan only"
+        case .agent:
+            return "Full governed actions"
+        case .review:
+            return "Findings-first review"
+        }
+    }
+}
+
+enum ReviewTargetKind: String, CaseIterable, Codable, Equatable {
+    case auto
+    case workingTree = "working_tree"
+    case staged
+    case branchDiff = "branch_diff"
+    case files
+    case projectSummary = "project_summary"
+
+    var label: String {
+        switch self {
+        case .auto: return "Auto"
+        case .workingTree: return "Working Tree"
+        case .staged: return "Staged"
+        case .branchDiff: return "Branch Diff"
+        case .files: return "Files"
+        case .projectSummary: return "Project Summary"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .auto:
+            return "Pick the best local evidence"
+        case .workingTree:
+            return "Review current local changes"
+        case .staged:
+            return "Review staged diff only"
+        case .branchDiff:
+            return "Compare two refs"
+        case .files:
+            return "Review selected local files"
+        case .projectSummary:
+            return "Review indexed project context"
+        }
+    }
 }
 
 // MARK: - Data Models
@@ -50,6 +121,7 @@ struct ChatMessage: Identifiable, Equatable {
     var isStreaming: Bool = false
     var executionSteps: [ExecutionStep] = []
     var thinkingContent: String?
+    var attachments: [AttachmentItem] = []
     let timestamp = Date()
 
     enum Role: Equatable {
@@ -65,7 +137,53 @@ struct ChatMessage: Identifiable, Equatable {
         lhs.isStreaming == rhs.isStreaming &&
         lhs.agent == rhs.agent &&
         lhs.executionSteps == rhs.executionSteps &&
-        lhs.thinkingContent == rhs.thinkingContent
+        lhs.thinkingContent == rhs.thinkingContent &&
+        lhs.attachments == rhs.attachments
+    }
+}
+
+struct AttachmentItem: Identifiable, Equatable {
+    let id: UUID
+    let url: URL
+
+    init(id: UUID = UUID(), url: URL) {
+        self.id = id
+        self.url = url.standardizedFileURL
+    }
+
+    var displayName: String {
+        url.lastPathComponent
+    }
+
+    var path: String {
+        url.path
+    }
+
+    var isImage: Bool {
+        let ext = url.pathExtension.lowercased()
+        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "bmp", "tiff", "svg"].contains(ext)
+    }
+
+    var isPreviewableText: Bool {
+        let ext = url.pathExtension.lowercased()
+        if isImage {
+            return false
+        }
+        return [
+            "txt", "md", "markdown", "py", "swift", "json", "toml", "yaml", "yml",
+            "js", "ts", "tsx", "jsx", "rb", "go", "rs", "java", "c", "cpp", "h",
+            "hpp", "sh", "zsh", "bash", "xml", "html", "css", "sql"
+        ].contains(ext)
+    }
+
+    var symbolName: String {
+        if isImage {
+            return "photo"
+        }
+        if isPreviewableText {
+            return "doc.text"
+        }
+        return "doc"
     }
 }
 
@@ -207,6 +325,9 @@ struct MemoryStats: Decodable {
     let files_indexed: Int
     let last_project_scan_at: Date?
     let durable_memories: Int?
+    let memory_candidates: Int?
+    let pending_memory_candidates: Int?
+    let pinned_durable_memories: Int?
     let conversation_episodes: Int?
     let project_notes: Int?
     let file_chunks: Int?
@@ -229,6 +350,7 @@ struct MemoryRecord: Identifiable, Decodable {
     let salience: Double
     let tags: [String]
     let deletable: Bool
+    let pinned: Bool
 
     var id: String { "\(sourceTable):\(memoryId)" }
 
@@ -247,6 +369,71 @@ struct MemoryRecord: Identifiable, Decodable {
         case salience
         case tags
         case deletable
+        case pinned
+    }
+}
+
+struct MemoryGovernanceInfo: Decodable {
+    let pendingCandidates: Int
+    let pinnedMemories: Int
+    let autoApproveEnabled: Bool
+    let autoApproveMinConfidence: Double
+
+    enum CodingKeys: String, CodingKey {
+        case pendingCandidates = "pending_candidates"
+        case pinnedMemories = "pinned_memories"
+        case autoApproveEnabled = "auto_approve_enabled"
+        case autoApproveMinConfidence = "auto_approve_min_confidence"
+    }
+}
+
+struct MemoryCandidateInfo: Identifiable, Decodable {
+    let candidateId: Int
+    let status: String
+    let memoryKind: String
+    let category: String
+    let label: String
+    let text: String
+    let evidence: String
+    let source: String
+    let projectPath: String?
+    let sessionId: String?
+    let createdAt: Date?
+    let updatedAt: Date?
+    let expiresAt: Date?
+    let confidence: Double
+    let salience: Double
+    let tags: [String]
+    let existingMemoryId: Int?
+    let promotedMemoryId: Int?
+    let proposedAction: String
+    let existingLabel: String?
+    let existingText: String?
+
+    var id: String { "candidate:\(candidateId)" }
+
+    enum CodingKeys: String, CodingKey {
+        case candidateId = "candidate_id"
+        case status
+        case memoryKind = "memory_kind"
+        case category
+        case label
+        case text
+        case evidence
+        case source
+        case projectPath = "project_path"
+        case sessionId = "session_id"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case expiresAt = "expires_at"
+        case confidence
+        case salience
+        case tags
+        case existingMemoryId = "existing_memory_id"
+        case promotedMemoryId = "promoted_memory_id"
+        case proposedAction = "proposed_action"
+        case existingLabel = "existing_label"
+        case existingText = "existing_text"
     }
 }
 
@@ -323,6 +510,8 @@ struct MemoryInjectionReason: Identifiable, Decodable {
     let score: Double
     let why: String
     let deletable: Bool
+    let reviewState: String
+    let pinned: Bool
 
     var id: String { "\(sourceTable):\(memoryId)" }
 
@@ -337,6 +526,8 @@ struct MemoryInjectionReason: Identifiable, Decodable {
         case score
         case why
         case deletable
+        case reviewState = "review_state"
+        case pinned
     }
 }
 
@@ -360,6 +551,8 @@ struct MemoryOverview: Decodable {
     let userProfile: [MemoryRecord]
     let preferences: [MemoryRecord]
     let recentMemories: [MemoryRecord]
+    let pendingCandidates: [MemoryCandidateInfo]
+    let governance: MemoryGovernanceInfo
     let conversationSummaries: [MemoryRecord]
     let projectSummaries: [ProjectSummaryInfo]
     let scanStatus: ScanStatusInfo
@@ -369,10 +562,231 @@ struct MemoryOverview: Decodable {
         case userProfile = "user_profile"
         case preferences
         case recentMemories = "recent_memories"
+        case pendingCandidates = "pending_candidates"
+        case governance
         case conversationSummaries = "conversation_summaries"
         case projectSummaries = "project_summaries"
         case scanStatus = "scan_status"
         case currentTurnMemory = "current_turn_memory"
+    }
+}
+
+struct ReviewCapabilitiesInfo: Decodable {
+    let workspaceRoot: String
+    let projectPath: String
+    let repoRoot: String?
+    let gitAvailable: Bool
+    let currentBranch: String?
+    let workingTreeFiles: [String]
+    let stagedFiles: [String]
+    let hasWorkingTreeChanges: Bool
+    let hasStagedChanges: Bool
+    let indexedProjectAvailable: Bool
+    let availableTargets: [String]
+    let defaultTarget: String
+
+    enum CodingKeys: String, CodingKey {
+        case workspaceRoot = "workspace_root"
+        case projectPath = "project_path"
+        case repoRoot = "repo_root"
+        case gitAvailable = "git_available"
+        case currentBranch = "current_branch"
+        case workingTreeFiles = "working_tree_files"
+        case stagedFiles = "staged_files"
+        case hasWorkingTreeChanges = "has_working_tree_changes"
+        case hasStagedChanges = "has_staged_changes"
+        case indexedProjectAvailable = "indexed_project_available"
+        case availableTargets = "available_targets"
+        case defaultTarget = "default_target"
+    }
+}
+
+struct ReviewFindingInfo: Identifiable, Decodable, Equatable {
+    let severity: String
+    let filePath: String
+    let evidence: String
+    let risk: String
+    let recommendedFix: String
+
+    var id: String { "\(severity):\(filePath):\(evidence)" }
+
+    enum CodingKeys: String, CodingKey {
+        case severity
+        case filePath = "file_path"
+        case evidence
+        case risk
+        case recommendedFix = "recommended_fix"
+    }
+}
+
+struct ReviewRunInfo: Identifiable, Decodable, Equatable {
+    let reviewId: String
+    let createdAt: Date?
+    let title: String
+    let targetKind: String
+    let targetLabel: String
+    let scopeSummary: String
+    let projectPath: String?
+    let repoRoot: String?
+    let baseRef: String?
+    let headRef: String?
+    let filePaths: [String]
+    let summary: String
+    let residualRisk: String
+    let findings: [ReviewFindingInfo]
+    let severityCounts: [String: Int]
+
+    var id: String { reviewId }
+
+    enum CodingKeys: String, CodingKey {
+        case reviewId = "review_id"
+        case createdAt = "created_at"
+        case title
+        case targetKind = "target_kind"
+        case targetLabel = "target_label"
+        case scopeSummary = "scope_summary"
+        case projectPath = "project_path"
+        case repoRoot = "repo_root"
+        case baseRef = "base_ref"
+        case headRef = "head_ref"
+        case filePaths = "file_paths"
+        case summary
+        case residualRisk = "residual_risk"
+        case findings
+        case severityCounts = "severity_counts"
+    }
+}
+
+struct BackgroundJobApprovalInfo: Identifiable, Decodable, Equatable {
+    let approvalId: String
+    let toolName: String
+    let title: String
+    let description: String
+    let executionType: String
+    let scopeLabel: String
+    let requestedAt: Date?
+    let expiresAt: Date?
+    let status: String
+
+    var id: String { approvalId }
+
+    enum CodingKeys: String, CodingKey {
+        case approvalId = "approval_id"
+        case toolName = "tool_name"
+        case title
+        case description
+        case executionType = "execution_type"
+        case scopeLabel = "scope_label"
+        case requestedAt = "requested_at"
+        case expiresAt = "expires_at"
+        case status
+    }
+}
+
+struct BackgroundJobInfo: Identifiable, Decodable, Equatable {
+    let jobId: String
+    let title: String
+    let prompt: String
+    let mode: String
+    let sessionId: String
+    let projectPath: String?
+    let status: String
+    let createdAt: Date?
+    let updatedAt: Date?
+    let startedAt: Date?
+    let finishedAt: Date?
+    let lastEventAt: Date?
+    let latestEvent: String?
+    let logPath: String
+    let errorMessage: String?
+    let pendingRunId: String?
+    let resumeCount: Int
+    let sessionPersisted: Bool
+    let assistantPreview: String
+    let branchMode: String?
+    let branchName: String?
+    let taskSlug: String?
+    let branchStatus: String?
+    let branchMessage: String?
+    let branchHelperPath: String?
+    let active: Bool
+    let approvals: [BackgroundJobApprovalInfo]
+
+    var id: String { jobId }
+
+    enum CodingKeys: String, CodingKey {
+        case jobId = "job_id"
+        case title
+        case prompt
+        case mode
+        case sessionId = "session_id"
+        case projectPath = "project_path"
+        case status
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+        case lastEventAt = "last_event_at"
+        case latestEvent = "latest_event"
+        case logPath = "log_path"
+        case errorMessage = "error_message"
+        case pendingRunId = "pending_run_id"
+        case resumeCount = "resume_count"
+        case sessionPersisted = "session_persisted"
+        case assistantPreview = "assistant_preview"
+        case branchMode = "branch_mode"
+        case branchName = "branch_name"
+        case taskSlug = "task_slug"
+        case branchStatus = "branch_status"
+        case branchMessage = "branch_message"
+        case branchHelperPath = "branch_helper_path"
+        case active
+        case approvals
+    }
+}
+
+struct BackgroundJobLogEntryInfo: Identifiable, Decodable, Equatable {
+    let timestamp: String
+    let type: String
+    let message: String
+
+    var id: String { "\(timestamp):\(type):\(message)" }
+}
+
+struct BackgroundJobLogTailInfo: Decodable, Equatable {
+    let jobId: String
+    let logPath: String
+    let entries: [BackgroundJobLogEntryInfo]
+    let text: String
+    let truncated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case jobId = "job_id"
+        case logPath = "log_path"
+        case entries
+        case text
+        case truncated
+    }
+}
+
+struct SessionMessageInfo: Decodable, Equatable {
+    let role: String
+    let content: String
+}
+
+struct BackgroundJobTakeoverInfo: Decodable, Equatable {
+    let job: BackgroundJobInfo
+    let sessionId: String
+    let mode: String
+    let projectPath: String?
+    let messages: [SessionMessageInfo]
+
+    enum CodingKeys: String, CodingKey {
+        case job
+        case sessionId = "session_id"
+        case mode
+        case projectPath = "project_path"
+        case messages
     }
 }
 
@@ -410,6 +824,111 @@ struct RuntimeTrustInfo: Decodable {
     }
 }
 
+struct GitStatusInfo: Decodable {
+    let available: Bool?
+    let isRepo: Bool?
+    let repoRoot: String?
+    let branch: String?
+    let branchSummary: String?
+    let clean: Bool?
+    let stagedCount: Int?
+    let unstagedCount: Int?
+    let untrackedCount: Int?
+    let changedFileCount: Int?
+    let summary: String?
+
+    enum CodingKeys: String, CodingKey {
+        case available
+        case isRepo = "is_repo"
+        case repoRoot = "repo_root"
+        case branch
+        case branchSummary = "branch_summary"
+        case clean
+        case stagedCount = "staged_count"
+        case unstagedCount = "unstaged_count"
+        case untrackedCount = "untracked_count"
+        case changedFileCount = "changed_file_count"
+        case summary
+    }
+}
+
+struct BossControlFileStatusInfo: Decodable, Equatable {
+    let path: String
+    let exists: Bool
+}
+
+struct BossControlRuleStatusInfo: Decodable, Equatable {
+    let name: String?
+    let title: String
+    let path: String
+}
+
+struct BossControlStatusInfo: Decodable {
+    let configured: Bool?
+    let defaultMode: String?
+    let reviewModeName: String?
+    let files: [String: BossControlFileStatusInfo]?
+    let rules: [BossControlRuleStatusInfo]?
+
+    enum CodingKeys: String, CodingKey {
+        case configured
+        case defaultMode = "default_mode"
+        case reviewModeName = "review_mode_name"
+        case files
+        case rules
+    }
+}
+
+struct BossControlHealthInfo: Decodable {
+    let configured: Bool?
+    let healthy: Bool?
+    let rulesCount: Int?
+    let rulesHealthy: Bool?
+    let missingFiles: [String]?
+    let defaultMode: String?
+    let reviewModeName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case configured
+        case healthy
+        case rulesCount = "rules_count"
+        case rulesHealthy = "rules_healthy"
+        case missingFiles = "missing_files"
+        case defaultMode = "default_mode"
+        case reviewModeName = "review_mode_name"
+    }
+}
+
+struct DiagnosticsSummaryInfo: Decodable {
+    let providerMode: String?
+    let gitAvailable: Bool?
+    let gitSummary: String?
+    let repoClean: Bool?
+    let pendingMemoryCount: Int?
+    let pendingJobsCount: Int?
+    let pendingRunsCount: Int?
+    let lockConsistent: Bool?
+    let statusWarnings: [String]?
+    let bossControlConfigured: Bool?
+    let bossControlHealthy: Bool?
+    let rulesCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case providerMode = "provider_mode"
+        case gitAvailable = "git_available"
+        case gitSummary = "git_summary"
+        case repoClean = "repo_clean"
+        case pendingMemoryCount = "pending_memory_count"
+        case pendingJobsCount = "pending_jobs_count"
+        case pendingRunsCount = "pending_runs_count"
+        case lockConsistent = "lock_consistent"
+        case statusWarnings = "status_warnings"
+        case bossControlConfigured = "boss_control_configured"
+        case bossControlHealthy = "boss_control_healthy"
+        case rulesCount = "rules_count"
+    }
+}
+
 struct SystemStatusInfo: Decodable {
     let providerMode: String?
     let appVersion: String?
@@ -420,7 +939,15 @@ struct SystemStatusInfo: Decodable {
     let interpreterPath: String?
     let workspacePath: String?
     let currentWorkingDirectory: String?
+    let git: GitStatusInfo?
     let runtimeTrust: RuntimeTrustInfo?
+    let bossControl: BossControlStatusInfo?
+    let bossControlHealth: BossControlHealthInfo?
+    let diagnostics: DiagnosticsSummaryInfo?
+    let pendingRunsCount: Int?
+    let pendingApprovalsCount: Int?
+    let stalePendingRunsCount: Int?
+    let backgroundJobsCount: Int?
 
     enum CodingKeys: String, CodingKey {
         case providerMode = "provider_mode"
@@ -432,7 +959,15 @@ struct SystemStatusInfo: Decodable {
         case interpreterPath = "interpreter_path"
         case workspacePath = "workspace_path"
         case currentWorkingDirectory = "current_working_directory"
+        case git
         case runtimeTrust = "runtime_trust"
+        case bossControl = "boss_control"
+        case bossControlHealth = "boss_control_health"
+        case diagnostics
+        case pendingRunsCount = "pending_runs_count"
+        case pendingApprovalsCount = "pending_approvals_count"
+        case stalePendingRunsCount = "stale_pending_runs_count"
+        case backgroundJobsCount = "background_jobs_count"
     }
 }
 

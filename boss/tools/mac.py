@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from boss.control import is_path_allowed_for_agent
 from boss.execution import (
     ExecutionType,
     applescript_scope_key,
@@ -60,9 +61,13 @@ def run_applescript(script: str) -> str:
 )
 def search_files(query: str, directory: str = "~") -> str:
     expanded_directory = str(Path(directory).expanduser())
-    return _run_command(
+    output = _run_command(
         ["mdfind", "-onlyin", expanded_directory, f"kMDItemDisplayName == '*{query}*'"]
-    ) or "No files found"
+    )
+    filtered = [
+        line for line in output.splitlines() if line.strip() and is_path_allowed_for_agent(line.strip())
+    ]
+    return "\n".join(filtered) or "No files found"
 
 
 @governed_function_tool(

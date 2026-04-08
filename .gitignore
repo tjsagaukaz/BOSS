@@ -40,7 +40,25 @@ DerivedData/
 .Trashes/
 
 # Boss runtime state, logs, and local databases
-.boss/
+.boss/*
+!.boss/config.toml
+!.boss/environment.json
+!.boss/review.md
+!.boss/rules/
+!.boss/rules/*.md
+.boss/**/*.db
+.boss/**/*.db-shm
+.boss/**/*.db-wal
+.boss/**/*.sqlite
+.boss/**/*.sqlite-shm
+.boss/**/*.sqlite-wal
+.boss/**/*.sqlite3
+.boss/**/*.sqlite3-shm
+.boss/**/*.sqlite3-wal
+.boss/**/*.log
+.boss/**/*.pid
+.boss/**/*.lock
+.boss/**/pending_runs/
 *.db
 *.db-shm
 *.db-wal
@@ -66,3 +84,4 @@ pending_runs/
 *.p12
 *.secret
 secrets.*
+

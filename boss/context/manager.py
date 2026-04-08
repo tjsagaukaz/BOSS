@@ -43,6 +43,7 @@ class SessionContextManager:
         injection = build_memory_injection(
             user_message=user_message,
             session_summary=session.summary,
+            session_id=session_id,
         )
         memory_text = injection.text
 
@@ -87,6 +88,7 @@ class SessionContextManager:
         return build_memory_injection(
             user_message=user_message,
             session_summary=session.summary,
+            session_id=session_id,
         )
 
     def persist_result(self, session_id: str, run_history: list[Any]) -> SessionState:

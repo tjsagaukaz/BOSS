@@ -1,0 +1,23 @@
+{
+  "name": "Boss local macOS workspace",
+  "platform": "macOS",
+  "workspace_root": "/Users/tj/boss",
+  "client": "SwiftUI macOS app",
+  "backend": "FastAPI local server",
+  "constraints": [
+    "Keep Boss local-first and repository-native.",
+    "SwiftUI and macOS validation must remain local.",
+    "Do not move app verification into hosted-only workflows.",
+    "Preserve existing SSE and persistence contracts unless the task explicitly changes them."
+  ],
+  "validation": {
+    "backend": [
+      "cd /Users/tj/boss && python3 -m compileall boss",
+      "cd /Users/tj/boss && /Users/tj/boss/.venv/bin/python scripts/dev_doctor.py",
+      "cd /Users/tj/boss && /Users/tj/boss/.venv/bin/python scripts/smoke_local.py"
+    ],
+    "client": [
+      "cd /Users/tj/boss/BossApp && swift build"
+    ]
+  }
+}

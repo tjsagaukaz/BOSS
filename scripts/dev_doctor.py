@@ -25,10 +25,14 @@ REQUIRED_STATUS_FIELDS = {
     "workspace_path",
     "app_version",
     "build_marker",
+    "git",
+    "diagnostics",
     "runtime_trust",
+    "boss_control",
     "memory",
-    "pending_run_count",
-    "stale_pending_run_count",
+    "pending_runs_count",
+    "stale_pending_runs_count",
+    "background_jobs_count",
 }
 EXTRA_RUNTIME_PACKAGES = ["fastapi", "uvicorn"]
 
@@ -53,6 +57,8 @@ def main() -> int:
         checks.append(check_status_fields(status))
         checks.append(check_lock_agreement(status))
         checks.append(check_runtime_identity(status))
+        checks.append(check_git_status(status))
+        checks.append(check_boss_control(status))
 
     print(f"Boss Dev Doctor\nroot: {ROOT}\nbase_url: {BASE_URL}\n")
     for check in checks:
@@ -146,6 +152,7 @@ def check_status_fields(status: dict) -> Check:
 
 def check_lock_agreement(status: dict) -> Check:
     runtime_trust = status.get("runtime_trust") or {}
+    diagnostics = status.get("diagnostics") or {}
     warnings = runtime_trust.get("warnings") or []
     lock_exists = runtime_trust.get("lock_exists")
     lock_pid = runtime_trust.get("lock_pid")
@@ -157,7 +164,19 @@ def check_lock_agreement(status: dict) -> Check:
         return Check("lock agreement", False, f"Lock pid {lock_pid} does not match live pid {process_id}")
     if warnings:
         return Check("lock agreement", False, f"Runtime trust warnings: {', '.join(warnings)}")
+    if diagnostics.get("lock_consistent") is False:
+        return Check("lock agreement", False, "Diagnostics summary reports inconsistent lock state")
     return Check("lock agreement", True, f"Lock file agrees with live pid {process_id}")
+
+
+def check_git_status(status: dict) -> Check:
+    git = status.get("git") or {}
+    if not git.get("available"):
+        return Check("git status", False, "git is unavailable on PATH")
+    if not git.get("is_repo"):
+        return Check("git status", False, "Workspace is not inside a git repository")
+    summary = git.get("summary") or "No git summary"
+    return Check("git status", True, summary)
 
 
 def check_runtime_identity(status: dict) -> Check:
@@ -173,6 +192,29 @@ def check_runtime_identity(status: dict) -> Check:
     if issues:
         return Check("runtime identity", False, "; ".join(issues))
     return Check("runtime identity", True, f"workspace={workspace_path} interpreter={interpreter_path}")
+
+
+def check_boss_control(status: dict) -> Check:
+    control = status.get("boss_control")
+    health = status.get("boss_control_health") or {}
+    if not isinstance(control, dict):
+        return Check("boss control", False, "Missing boss_control payload")
+
+    if not control.get("configured"):
+        return Check("boss control", False, "Boss control files were not detected")
+
+    files = control.get("files") or {}
+    boss_md = files.get("BOSS.md") or {}
+    config = files.get("config") or {}
+    if not boss_md.get("exists") or not config.get("exists"):
+        return Check("boss control", False, "BOSS.md or .boss/config.toml is missing from status")
+
+    if not health.get("healthy"):
+        missing = ", ".join(health.get("missing_files") or []) or "rules"
+        return Check("boss control", False, f"Boss control is incomplete: {missing}")
+
+    detail = f"mode={control.get('default_mode', 'default')} rules={health.get('rules_count', len(control.get('rules') or []))}"
+    return Check("boss control", True, detail)
 
 
 if __name__ == "__main__":

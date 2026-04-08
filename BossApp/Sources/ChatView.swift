@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Typography Tokens
@@ -163,6 +164,10 @@ struct ChatView: View {
         !vm.inputText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    private var hasDraftContent: Bool {
+        hasText || !vm.draftAttachments.isEmpty
+    }
+
     private var inputBar: some View {
         VStack(spacing: 0) {
             // Text area
@@ -184,25 +189,87 @@ struct ChatView: View {
                 .padding(.top, 18)
                 .padding(.bottom, 12)
 
+            if !vm.draftAttachments.isEmpty {
+                attachmentTray
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+            }
+
             // Bottom toolbar row
             HStack(spacing: 12) {
-                Button(action: {}) {
+                Button(action: pickAttachments) {
                     Image(systemName: "plus")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundColor(Typo.secondaryText)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle()
+                                .fill(Color.white.opacity(0.04))
+                        )
                 }
                 .buttonStyle(.plain)
 
-                Spacer()
+                Spacer(minLength: 12)
+
+                Menu {
+                    ForEach(WorkMode.allCases, id: \.rawValue) { mode in
+                        Button {
+                            vm.selectMode(mode)
+                        } label: {
+                            HStack {
+                                Text(mode.label)
+                                Spacer()
+                                if vm.selectedMode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(vm.selectedMode.label)
+                            .font(.system(size: 12, weight: .medium))
+                        Text(vm.selectedMode.detail)
+                            .font(.system(size: 11))
+                            .foregroundColor(Typo.tertiaryText)
+                    }
+                    .foregroundColor(Typo.secondaryText)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(Color.white.opacity(0.05))
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 12)
+
+                Button(action: { vm.launchBackgroundJob() }) {
+                    Image(systemName: vm.isLaunchingBackgroundJob ? "hourglass" : "clock.badge.plus")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(hasDraftContent && !vm.isLaunchingBackgroundJob ? .white : Typo.tertiaryText)
+                        .frame(width: 30, height: 30)
+                        .background(
+                            Circle()
+                                .fill(hasDraftContent && !vm.isLaunchingBackgroundJob
+                                    ? Color.white.opacity(0.12)
+                                    : Color.white.opacity(0.06))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Launch this prompt as a local background job")
+                .disabled(!hasDraftContent || vm.isLaunchingBackgroundJob)
 
                 Button(action: { vm.send() }) {
                     Image(systemName: vm.isLoading ? "stop.fill" : "arrow.up")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(hasText || vm.isLoading ? .white : Typo.tertiaryText)
+                        .foregroundColor(hasDraftContent || vm.isLoading ? .white : Typo.tertiaryText)
                         .frame(width: 30, height: 30)
                         .background(
                             Circle()
-                                .fill(hasText || vm.isLoading
+                                .fill(hasDraftContent || vm.isLoading
                                     ? BossColor.accent
                                     : Color.white.opacity(0.06))
                         )
@@ -218,6 +285,34 @@ struct ChatView: View {
                 .fill(Color.white.opacity(0.06))
         )
         .padding(.horizontal, 20)
+    }
+
+    private var attachmentTray: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(vm.draftAttachments) { attachment in
+                    AttachmentChipView(attachment: attachment, removable: true) {
+                        vm.removeDraftAttachment(attachment.id)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func pickAttachments() {
+        let panel = NSOpenPanel()
+        panel.title = "Add Images or Files"
+        panel.message = "Choose local files to attach to your message."
+        panel.prompt = "Add"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.resolvesAliases = true
+
+        if panel.runModal() == .OK {
+            vm.addAttachments(panel.urls)
+        }
     }
 }
 
@@ -259,12 +354,20 @@ struct MessageView: View {
     // MARK: - User Message (left-rail aligned, subtle container)
 
     private var userMessage: some View {
-        Text(message.content)
-            .font(.system(size: Typo.bodySize))
-            .tracking(Typo.tracking)
-            .lineSpacing(Typo.lineGap)
-            .foregroundColor(Typo.primaryText)
-            .textSelection(.enabled)
+        VStack(alignment: .leading, spacing: 10) {
+            if !message.attachments.isEmpty {
+                attachmentWrap(message.attachments, removable: false)
+            }
+
+            if !message.content.isEmpty {
+                Text(message.content)
+                    .font(.system(size: Typo.bodySize))
+                    .tracking(Typo.tracking)
+                    .lineSpacing(Typo.lineGap)
+                    .foregroundColor(Typo.primaryText)
+                    .textSelection(.enabled)
+            }
+        }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
@@ -276,6 +379,14 @@ struct MessageView: View {
                     .stroke(Color.white.opacity(0.04), lineWidth: 1)
             )
             .frame(maxWidth: 640, alignment: .leading)
+    }
+
+    private func attachmentWrap(_ attachments: [AttachmentItem], removable: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(attachments) { attachment in
+                AttachmentChipView(attachment: attachment, removable: removable)
+            }
+        }
     }
 
     // MARK: - Assistant Message (editorial text block)
@@ -439,5 +550,51 @@ struct MessageView: View {
             .tracking(Typo.tracking)
             .foregroundColor(BossColor.accent.opacity(0.8))
             .frame(maxWidth: 640, alignment: .leading)
+    }
+}
+
+private struct AttachmentChipView: View {
+    let attachment: AttachmentItem
+    let removable: Bool
+    var onRemove: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: attachment.symbolName)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.72))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.displayName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.82))
+                    .lineLimit(1)
+
+                Text(attachment.path)
+                    .font(.system(size: 10))
+                    .foregroundColor(Color.white.opacity(0.38))
+                    .lineLimit(1)
+            }
+
+            if removable, let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Color.white.opacity(0.45))
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.05))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
     }
 }

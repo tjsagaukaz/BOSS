@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Iterable
 
 from boss.config import settings
+from boss.control import (
+    is_memory_distillation_enabled,
+    memory_auto_approve_enabled,
+    memory_auto_approve_min_confidence,
+)
 from boss.memory.injection import resolve_project_reference
 from boss.memory.knowledge import DurableMemory, ProjectNote, get_knowledge_store
 from boss.observability import log_memory_distillation
@@ -19,6 +24,7 @@ class MemoryCandidate:
     category: str
     key: str
     value: str
+    evidence: str = ""
     project_path: str | None = None
     tags: list[str] = field(default_factory=list)
     confidence: float = 0.75
@@ -77,7 +83,7 @@ _DURABLE_FACT_FIELDS = {
 
 
 def distill_latest_turn(*, session_id: str, session_summary: str, recent_items: list[dict]) -> list[MemoryCandidate]:
-    if not settings.auto_memory_enabled:
+    if not is_memory_distillation_enabled():
         return []
 
     user_text, assistant_text = _latest_turn_text(recent_items)
@@ -110,7 +116,7 @@ def distill_latest_turn(*, session_id: str, session_summary: str, recent_items: 
         if candidate.storage == "project_note":
             _persist_project_candidate(store, candidate)
         else:
-            _persist_durable_candidate(store, candidate)
+            _queue_durable_candidate(store, candidate, session_id=session_id)
         log_memory_distillation(
             source=candidate.source,
             category=candidate.category,
@@ -138,6 +144,7 @@ def _extract_identity(sentence: str) -> list[MemoryCandidate]:
                 category="user",
                 key=key,
                 value=value,
+                evidence=sentence,
                 tags=["identity", key],
                 confidence=confidence,
                 salience=salience,
@@ -164,6 +171,7 @@ def _extract_preferences(sentence: str) -> list[MemoryCandidate]:
                 category="preference",
                 key=key,
                 value=normalized_value,
+                evidence=sentence,
                 tags=tags + ["preference", polarity],
                 confidence=0.84,
                 salience=0.9,
@@ -189,6 +197,7 @@ def _extract_goals(sentence: str, *, project_path: str | None) -> list[MemoryCan
                 category="ongoing_goal",
                 key=key,
                 value=value,
+                evidence=sentence,
                 project_path=project_path,
                 tags=["goal", *( [Path(project_path).name.lower()] if project_path else [] )],
                 confidence=0.78,
@@ -215,6 +224,7 @@ def _extract_workflows(sentence: str, *, project_path: str | None) -> list[Memor
                 category="workflow",
                 key=key,
                 value=value,
+                evidence=sentence,
                 project_path=project_path,
                 tags=["workflow", *( [Path(project_path).name.lower()] if project_path else [] )],
                 confidence=0.8,
@@ -246,6 +256,7 @@ def _extract_project_constraints(
             key=_semantic_key(value, prefix="constraint"),
             title=f"Constraint for {Path(project_path).name}",
             value=value,
+            evidence=sentence,
             project_path=project_path,
             tags=["project_constraint", Path(project_path).name.lower()],
             confidence=0.82,
@@ -275,6 +286,7 @@ def _extract_durable_facts(sentence: str) -> list[MemoryCandidate]:
             category="durable_fact",
             key=field.replace(" ", "_"),
             value=value,
+            evidence=sentence,
             tags=["durable_fact", field.replace(" ", "_")],
             confidence=0.82,
             salience=0.72,
@@ -283,36 +295,23 @@ def _extract_durable_facts(sentence: str) -> list[MemoryCandidate]:
     return candidates
 
 
-def _persist_durable_candidate(store, candidate: MemoryCandidate) -> None:
-    existing = _find_matching_durable_memory(store.list_durable_memories(
-        memory_kind=candidate.memory_kind,
-        project_path=candidate.project_path,
-        limit=50,
-    ), candidate)
-    key = candidate.key
-    value = candidate.value
-    confidence = candidate.confidence
-    salience = candidate.salience
-    tags = candidate.tags
-
-    if existing is not None:
-        key = existing.key
-        value = _merge_value(existing.value, candidate.value)
-        confidence = min(1.0, max(existing.confidence, candidate.confidence) + 0.08)
-        salience = min(1.0, max(existing.salience, candidate.salience) + 0.04)
-        tags = _merge_tags(existing.tags, candidate.tags)
-
-    store.upsert_durable_memory(
+def _queue_durable_candidate(store, candidate: MemoryCandidate, *, session_id: str) -> None:
+    queued = store.queue_memory_candidate(
+        session_id=session_id,
         memory_kind=candidate.memory_kind,
         category=candidate.category,
-        key=key,
-        value=value,
-        tags=tags,
-        confidence=confidence,
-        salience=salience,
+        key=candidate.key,
+        value=candidate.value,
+        evidence=candidate.evidence,
+        tags=candidate.tags,
+        confidence=candidate.confidence,
+        salience=candidate.salience,
         source=candidate.source,
         project_path=candidate.project_path,
     )
+
+    if memory_auto_approve_enabled() and queued.confidence >= memory_auto_approve_min_confidence():
+        store.approve_memory_candidate(queued.id)
 
 
 def _persist_project_candidate(store, candidate: MemoryCandidate) -> None:

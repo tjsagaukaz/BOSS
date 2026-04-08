@@ -87,7 +87,34 @@ class DurableMemory:
     created_at: str
     updated_at: str
     last_used_at: str | None
+    pinned: bool
+    pinned_at: str | None
     legacy_fact_id: int | None
+
+
+@dataclass
+class MemoryCandidateRecord:
+    id: int
+    session_id: str | None
+    memory_kind: str
+    category: str
+    key: str
+    value: str
+    evidence: str
+    tags: list[str]
+    confidence: float
+    salience: float
+    source: str
+    project_path: str | None
+    status: str
+    review_note: str | None
+    created_at: str
+    updated_at: str
+    last_used_at: str | None
+    reviewed_at: str | None
+    expires_at: str | None
+    existing_memory_id: int | None
+    promoted_memory_id: int | None
 
 
 @dataclass
@@ -177,6 +204,8 @@ class MemorySearchResult:
     last_used_at: str | None
     score: float
     legacy_fact_id: int | None = None
+    review_state: str = "approved"
+    pinned: bool = False
 
 
 _SCHEMA = """
@@ -223,10 +252,36 @@ CREATE TABLE IF NOT EXISTS durable_memories (
     salience REAL NOT NULL DEFAULT 0.5,
     source TEXT NOT NULL DEFAULT 'user',
     project_path TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    pinned_at TEXT,
     legacy_fact_id INTEGER UNIQUE,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_used_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    memory_kind TEXT NOT NULL,
+    category TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    evidence TEXT NOT NULL DEFAULT '',
+    tags TEXT NOT NULL DEFAULT '[]',
+    confidence REAL NOT NULL DEFAULT 0.75,
+    salience REAL NOT NULL DEFAULT 0.5,
+    source TEXT NOT NULL DEFAULT 'auto_distillation',
+    project_path TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    review_note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_used_at TEXT,
+    reviewed_at TEXT,
+    expires_at TEXT,
+    existing_memory_id INTEGER REFERENCES durable_memories(id) ON DELETE SET NULL,
+    promoted_memory_id INTEGER REFERENCES durable_memories(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS conversation_episodes (
@@ -298,6 +353,10 @@ CREATE INDEX IF NOT EXISTS idx_files_ext ON file_index(extension);
 CREATE INDEX IF NOT EXISTS idx_durable_kind ON durable_memories(memory_kind);
 CREATE INDEX IF NOT EXISTS idx_durable_project_path ON durable_memories(project_path);
 CREATE INDEX IF NOT EXISTS idx_durable_last_used ON durable_memories(last_used_at);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_status ON memory_candidates(status);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_session ON memory_candidates(session_id);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_project_path ON memory_candidates(project_path);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_kind ON memory_candidates(memory_kind);
 CREATE INDEX IF NOT EXISTS idx_episode_kind ON conversation_episodes(memory_kind);
 CREATE INDEX IF NOT EXISTS idx_episode_project_path ON conversation_episodes(project_path);
 CREATE INDEX IF NOT EXISTS idx_project_notes_kind ON project_notes(memory_kind);
@@ -425,6 +484,13 @@ class KnowledgeStore:
             self._conn.execute("DELETE FROM facts WHERE id = ?", (legacy_fact_id,))
         self._conn.commit()
         return True
+
+    def get_durable_memory(self, memory_id: int) -> DurableMemory | None:
+        row = self._conn.execute(
+            "SELECT * FROM durable_memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        return self._row_to_durable_memory(row) if row is not None else None
 
     # --- Durable memories ---
 
@@ -570,6 +636,7 @@ class KnowledgeStore:
         memory_kind: str | None = None,
         category: str | None = None,
         project_path: str | None = None,
+        pinned: bool | None = None,
         limit: int = 100,
     ) -> list[DurableMemory]:
         sql = "SELECT * FROM durable_memories WHERE 1 = 1"
@@ -584,12 +651,478 @@ class KnowledgeStore:
         if project_path is not None:
             sql += " AND COALESCE(project_path, '') = COALESCE(?, '')"
             params.append(project_path)
+        if pinned is not None:
+            sql += " AND pinned = ?"
+            params.append(1 if pinned else 0)
 
-        sql += " ORDER BY COALESCE(last_used_at, updated_at) DESC LIMIT ?"
+        sql += " ORDER BY pinned DESC, COALESCE(last_used_at, updated_at) DESC LIMIT ?"
         params.append(limit)
 
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_durable_memory(row) for row in rows]
+
+    def update_durable_memory(
+        self,
+        memory_id: int,
+        *,
+        key: str | None = None,
+        value: str | None = None,
+        tags: Iterable[str] | None = None,
+        confidence: float | None = None,
+        salience: float | None = None,
+        source: str | None = None,
+        project_path: str | None = None,
+        last_used_at: str | None = None,
+        pinned: bool | None = None,
+        commit: bool = True,
+    ) -> DurableMemory | None:
+        row = self._conn.execute(
+            "SELECT * FROM durable_memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        now = _now_iso()
+        resolved_key = key.strip() if isinstance(key, str) and key.strip() else str(row["key"])
+        resolved_value = value.strip() if isinstance(value, str) and value.strip() else str(row["value"])
+        resolved_tags = _json_dumps(_normalize_tags(tags if tags is not None else _json_loads_list(row["tags"])))
+        resolved_confidence = _clamp(confidence if confidence is not None else float(row["confidence"]))
+        resolved_salience = _clamp(salience if salience is not None else float(row["salience"]))
+        resolved_source = source or str(row["source"])
+        resolved_project_path = row["project_path"] if project_path is None else project_path
+        resolved_last_used_at = row["last_used_at"] if last_used_at is None else last_used_at
+        was_pinned = bool(row["pinned"])
+        resolved_pinned = was_pinned if pinned is None else pinned
+        resolved_pinned_at = row["pinned_at"]
+        if pinned is not None:
+            resolved_pinned_at = now if pinned else None
+
+        self._conn.execute(
+            """UPDATE durable_memories SET
+                   key = ?,
+                   value = ?,
+                   tags = ?,
+                   confidence = ?,
+                   salience = ?,
+                   source = ?,
+                   project_path = ?,
+                   updated_at = ?,
+                   last_used_at = ?,
+                   pinned = ?,
+                   pinned_at = ?
+               WHERE id = ?""",
+            (
+                resolved_key,
+                resolved_value,
+                resolved_tags,
+                resolved_confidence,
+                resolved_salience,
+                resolved_source,
+                resolved_project_path,
+                now,
+                resolved_last_used_at,
+                1 if resolved_pinned else 0,
+                resolved_pinned_at,
+                memory_id,
+            ),
+        )
+
+        legacy_fact_id = row["legacy_fact_id"]
+        if legacy_fact_id is not None:
+            try:
+                self._conn.execute(
+                    """UPDATE facts SET
+                           category = ?,
+                           key = ?,
+                           value = ?,
+                           source = ?,
+                           updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        str(row["category"]),
+                        resolved_key,
+                        resolved_value,
+                        resolved_source,
+                        now,
+                        legacy_fact_id,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                self._conn.execute(
+                    "UPDATE facts SET value = ?, source = ?, updated_at = ? WHERE id = ?",
+                    (resolved_value, resolved_source, now, legacy_fact_id),
+                )
+
+        updated = self.get_durable_memory(memory_id)
+        if updated is None:
+            raise RuntimeError("Failed to update durable memory")
+        if commit:
+            self._conn.commit()
+        return updated
+
+    def set_durable_memory_pinned(
+        self,
+        memory_id: int,
+        *,
+        pinned: bool,
+        commit: bool = True,
+    ) -> DurableMemory | None:
+        return self.update_durable_memory(memory_id, pinned=pinned, commit=commit)
+
+    # --- Pending memory candidates ---
+
+    def queue_memory_candidate(
+        self,
+        *,
+        session_id: str | None,
+        memory_kind: str,
+        category: str,
+        key: str,
+        value: str,
+        evidence: str = "",
+        tags: Iterable[str] | None = None,
+        confidence: float = 0.75,
+        salience: float = 0.5,
+        source: str = "auto_distillation",
+        project_path: str | None = None,
+        commit: bool = True,
+    ) -> MemoryCandidateRecord:
+        now = _now_iso()
+        normalized_tags = _normalize_tags(tags)
+        proposed_key = key
+        proposed_value = value
+        proposed_evidence = evidence
+        proposed_confidence = _clamp(confidence)
+        proposed_salience = _clamp(salience)
+
+        matching_memory = self._match_durable_memory(
+            self.list_durable_memories(memory_kind=memory_kind, project_path=project_path, limit=50),
+            category=category,
+            key=key,
+            value=value,
+        )
+        existing_memory_id = matching_memory.id if matching_memory is not None else None
+        if matching_memory is not None:
+            proposed_key = matching_memory.key
+            proposed_value = _merge_value(matching_memory.value, proposed_value)
+            proposed_tags = _merge_tags(matching_memory.tags, normalized_tags)
+            proposed_confidence = min(1.0, max(matching_memory.confidence, proposed_confidence) + 0.05)
+            proposed_salience = min(1.0, max(matching_memory.salience, proposed_salience) + 0.03)
+        else:
+            proposed_tags = normalized_tags
+
+        pending_candidates = self.list_memory_candidates(
+            status="pending",
+            session_id=session_id,
+            memory_kind=memory_kind,
+            project_path=project_path,
+            limit=50,
+        )
+        matching_candidate = self._match_memory_candidate(
+            pending_candidates,
+            category=category,
+            key=proposed_key,
+            value=proposed_value,
+        )
+
+        if matching_candidate is not None:
+            proposed_key = matching_candidate.key
+            proposed_value = _merge_value(matching_candidate.value, proposed_value)
+            proposed_evidence = _merge_value(matching_candidate.evidence, proposed_evidence)
+            proposed_tags = _merge_tags(matching_candidate.tags, proposed_tags)
+            proposed_confidence = min(1.0, max(matching_candidate.confidence, proposed_confidence) + 0.03)
+            proposed_salience = min(1.0, max(matching_candidate.salience, proposed_salience) + 0.02)
+            existing_memory_id = matching_candidate.existing_memory_id or existing_memory_id
+            self._conn.execute(
+                """UPDATE memory_candidates SET
+                       key = ?,
+                       value = ?,
+                       evidence = ?,
+                       tags = ?,
+                       confidence = ?,
+                       salience = ?,
+                       source = ?,
+                       project_path = ?,
+                       updated_at = ?,
+                       existing_memory_id = ?
+                   WHERE id = ?""",
+                (
+                    proposed_key,
+                    proposed_value,
+                    proposed_evidence,
+                    _json_dumps(proposed_tags),
+                    proposed_confidence,
+                    proposed_salience,
+                    source,
+                    project_path,
+                    now,
+                    existing_memory_id,
+                    matching_candidate.id,
+                ),
+            )
+            candidate_id = matching_candidate.id
+        else:
+            self._conn.execute(
+                """INSERT INTO memory_candidates (
+                       session_id, memory_kind, category, key, value, evidence, tags,
+                       confidence, salience, source, project_path, status,
+                       created_at, updated_at, existing_memory_id
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                (
+                    session_id,
+                    memory_kind,
+                    category,
+                    proposed_key,
+                    proposed_value,
+                    proposed_evidence,
+                    _json_dumps(proposed_tags),
+                    proposed_confidence,
+                    proposed_salience,
+                    source,
+                    project_path,
+                    now,
+                    now,
+                    existing_memory_id,
+                ),
+            )
+            candidate_id = int(self._conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        row = self._conn.execute(
+            "SELECT * FROM memory_candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Failed to queue memory candidate")
+        if commit:
+            self._conn.commit()
+        return self._row_to_memory_candidate(row)
+
+    def get_memory_candidate(self, candidate_id: int) -> MemoryCandidateRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        return self._row_to_memory_candidate(row) if row is not None else None
+
+    def list_memory_candidates(
+        self,
+        *,
+        status: str | None = None,
+        session_id: str | None = None,
+        memory_kind: str | None = None,
+        project_path: str | None = None,
+        limit: int = 50,
+    ) -> list[MemoryCandidateRecord]:
+        sql = "SELECT * FROM memory_candidates WHERE 1 = 1"
+        params: list[Any] = []
+
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if session_id is not None:
+            sql += " AND COALESCE(session_id, '') = COALESCE(?, '')"
+            params.append(session_id)
+        if memory_kind:
+            sql += " AND memory_kind = ?"
+            params.append(memory_kind)
+        if project_path is not None:
+            sql += " AND COALESCE(project_path, '') = COALESCE(?, '')"
+            params.append(project_path)
+
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_memory_candidate(row) for row in rows]
+
+    def update_memory_candidate(
+        self,
+        candidate_id: int,
+        *,
+        key: str | None = None,
+        value: str | None = None,
+        evidence: str | None = None,
+        tags: Iterable[str] | None = None,
+        commit: bool = True,
+    ) -> MemoryCandidateRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if str(row["status"]) != "pending":
+            return None
+
+        now = _now_iso()
+        resolved_key = key.strip() if isinstance(key, str) and key.strip() else str(row["key"])
+        resolved_value = value.strip() if isinstance(value, str) and value.strip() else str(row["value"])
+        resolved_evidence = evidence.strip() if isinstance(evidence, str) and evidence.strip() else str(row["evidence"] or "")
+        resolved_tags = _json_dumps(_normalize_tags(tags if tags is not None else _json_loads_list(row["tags"])))
+
+        self._conn.execute(
+            """UPDATE memory_candidates SET
+                   key = ?,
+                   value = ?,
+                   evidence = ?,
+                   tags = ?,
+                   updated_at = ?
+               WHERE id = ?""",
+            (
+                resolved_key,
+                resolved_value,
+                resolved_evidence,
+                resolved_tags,
+                now,
+                candidate_id,
+            ),
+        )
+
+        updated = self.get_memory_candidate(candidate_id)
+        if updated is None:
+            raise RuntimeError("Failed to update memory candidate")
+        if commit:
+            self._conn.commit()
+        return updated
+
+    def approve_memory_candidate(
+        self,
+        candidate_id: int,
+        *,
+        key: str | None = None,
+        value: str | None = None,
+        evidence: str | None = None,
+        tags: Iterable[str] | None = None,
+        pin: bool = False,
+        review_note: str | None = None,
+    ) -> DurableMemory:
+        candidate = self.get_memory_candidate(candidate_id)
+        if candidate is None or candidate.status != "pending":
+            raise ValueError("Memory candidate is not pending")
+
+        if any(item is not None for item in (key, value, evidence, tags)):
+            updated_candidate = self.update_memory_candidate(
+                candidate_id,
+                key=key,
+                value=value,
+                evidence=evidence,
+                tags=tags,
+                commit=False,
+            )
+            if updated_candidate is not None:
+                candidate = updated_candidate
+
+        target_memory = self.get_durable_memory(candidate.existing_memory_id) if candidate.existing_memory_id else None
+        if target_memory is not None:
+            durable = self.update_durable_memory(
+                target_memory.id,
+                key=candidate.key,
+                value=candidate.value,
+                tags=candidate.tags,
+                confidence=max(target_memory.confidence, candidate.confidence),
+                salience=max(target_memory.salience, candidate.salience),
+                source="memory_review",
+                project_path=target_memory.project_path or candidate.project_path,
+                commit=False,
+            )
+            if durable is None:
+                raise RuntimeError("Failed to update durable memory from candidate")
+        else:
+            durable = self.upsert_durable_memory(
+                memory_kind=candidate.memory_kind,
+                category=candidate.category,
+                key=candidate.key,
+                value=candidate.value,
+                tags=candidate.tags,
+                confidence=candidate.confidence,
+                salience=candidate.salience,
+                source="memory_review",
+                project_path=candidate.project_path,
+                commit=False,
+            )
+
+        if pin:
+            pinned_memory = self.set_durable_memory_pinned(durable.id, pinned=True, commit=False)
+            if pinned_memory is not None:
+                durable = pinned_memory
+
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE memory_candidates SET
+                   status = 'approved',
+                   review_note = ?,
+                   reviewed_at = ?,
+                   updated_at = ?,
+                   last_used_at = ?,
+                   promoted_memory_id = ?
+               WHERE id = ?""",
+            (review_note, now, now, now, durable.id, candidate_id),
+        )
+        self._conn.commit()
+        return durable
+
+    def reject_memory_candidate(
+        self,
+        candidate_id: int,
+        *,
+        review_note: str | None = None,
+        commit: bool = True,
+    ) -> MemoryCandidateRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None or str(row["status"]) != "pending":
+            return None
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE memory_candidates SET
+                   status = 'rejected',
+                   review_note = ?,
+                   reviewed_at = ?,
+                   updated_at = ?
+               WHERE id = ?""",
+            (review_note, now, now, candidate_id),
+        )
+        candidate = self.get_memory_candidate(candidate_id)
+        if commit:
+            self._conn.commit()
+        return candidate
+
+    def expire_memory_candidate(
+        self,
+        candidate_id: int,
+        *,
+        review_note: str | None = None,
+        commit: bool = True,
+    ) -> MemoryCandidateRecord | None:
+        row = self._conn.execute(
+            "SELECT * FROM memory_candidates WHERE id = ?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None or str(row["status"]) != "pending":
+            return None
+        now = _now_iso()
+        self._conn.execute(
+            """UPDATE memory_candidates SET
+                   status = 'expired',
+                   review_note = ?,
+                   reviewed_at = ?,
+                   expires_at = ?,
+                   updated_at = ?
+               WHERE id = ?""",
+            (review_note, now, now, now, candidate_id),
+        )
+        candidate = self.get_memory_candidate(candidate_id)
+        if commit:
+            self._conn.commit()
+        return candidate
+
+    def delete_memory_candidate(self, candidate_id: int) -> bool:
+        cursor = self._conn.execute("DELETE FROM memory_candidates WHERE id = ?", (candidate_id,))
+        self._conn.commit()
+        return cursor.rowcount > 0
 
     # --- Projects ---
 
@@ -924,6 +1457,7 @@ class KnowledgeStore:
         limit: int = 20,
         *,
         project_path: str | None = None,
+        session_id: str | None = None,
         kinds: Iterable[str] | None = None,
     ) -> list[MemorySearchResult]:
         query = query.strip()
@@ -943,6 +1477,17 @@ class KnowledgeStore:
                 candidate_limit=max(limit * 6, 40),
             )
         )
+        if session_id:
+            results.extend(
+                self._search_memory_candidate_candidates(
+                    query=query,
+                    tokens=tokens,
+                    session_id=session_id,
+                    project_path=project_path,
+                    kind_filter=kind_filter,
+                    candidate_limit=max(limit * 4, 20),
+                )
+            )
         results.extend(
             self._search_project_note_candidates(
                 query=query,
@@ -1012,10 +1557,20 @@ class KnowledgeStore:
         projects_count = self._count_table("projects")
         files_count = self._count_table("file_index")
         durable_count = self._count_table("durable_memories")
+        candidate_count = self._count_table("memory_candidates")
         episodes_count = self._count_table("conversation_episodes")
         notes_count = self._count_table("project_notes")
         file_chunks_count = self._count_table("file_chunks")
         latest_scan = self._conn.execute("SELECT MAX(last_scanned) FROM projects").fetchone()[0]
+        pinned_count = int(
+            self._conn.execute("SELECT COUNT(*) FROM durable_memories WHERE pinned = 1").fetchone()[0]
+        )
+        candidate_status_counts = {
+            row["status"]: row["cnt"]
+            for row in self._conn.execute(
+                "SELECT status, COUNT(*) AS cnt FROM memory_candidates GROUP BY status"
+            ).fetchall()
+        }
 
         fact_categories = {
             row["category"]: row["cnt"]
@@ -1025,14 +1580,14 @@ class KnowledgeStore:
         }
 
         memory_types: dict[str, int] = {}
-        for table in ("durable_memories", "conversation_episodes", "project_notes", "file_chunks"):
+        for table in ("durable_memories", "memory_candidates", "conversation_episodes", "project_notes", "file_chunks"):
             for row in self._conn.execute(
                 f"SELECT memory_kind, COUNT(*) AS cnt FROM {table} GROUP BY memory_kind"
             ).fetchall():
                 memory_types[row["memory_kind"]] = memory_types.get(row["memory_kind"], 0) + row["cnt"]
 
         memory_categories: dict[str, int] = {}
-        for table in ("durable_memories", "conversation_episodes", "project_notes"):
+        for table in ("durable_memories", "memory_candidates", "conversation_episodes", "project_notes"):
             for row in self._conn.execute(
                 f"SELECT category, COUNT(*) AS cnt FROM {table} GROUP BY category"
             ).fetchall():
@@ -1045,6 +1600,12 @@ class KnowledgeStore:
             "last_project_scan_at": latest_scan,
             "fact_categories": fact_categories,
             "durable_memories": durable_count,
+            "memory_candidates": candidate_count,
+            "pending_memory_candidates": candidate_status_counts.get("pending", 0),
+            "approved_memory_candidates": candidate_status_counts.get("approved", 0),
+            "rejected_memory_candidates": candidate_status_counts.get("rejected", 0),
+            "expired_memory_candidates": candidate_status_counts.get("expired", 0),
+            "pinned_durable_memories": pinned_count,
             "conversation_episodes": episodes_count,
             "project_notes": notes_count,
             "file_chunks": file_chunks_count,
@@ -1055,12 +1616,15 @@ class KnowledgeStore:
     # --- Backfill and migration ---
 
     def _ensure_schema_extensions(self) -> None:
+        self._ensure_column("durable_memories", "pinned", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("durable_memories", "pinned_at", "TEXT")
         self._ensure_column("file_chunks", "file_name", "TEXT NOT NULL DEFAULT ''")
         self._ensure_column("file_chunks", "extension", "TEXT")
         self._ensure_column("file_chunks", "line_start", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("file_chunks", "line_end", "INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("file_chunks", "byte_size", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("file_chunks", "modified_at", "TEXT")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_durable_pinned ON durable_memories(pinned)")
         self._conn.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
@@ -1182,6 +1746,54 @@ class KnowledgeStore:
                 query=query,
                 tokens=tokens,
                 legacy_fact_id=row["legacy_fact_id"],
+            )
+            for row in rows
+        ]
+
+    def _search_memory_candidate_candidates(
+        self,
+        *,
+        query: str,
+        tokens: list[str],
+        session_id: str,
+        project_path: str | None,
+        kind_filter: set[str],
+        candidate_limit: int,
+    ) -> list[MemorySearchResult]:
+        sql = """
+            SELECT * FROM memory_candidates
+            WHERE status = 'pending' AND COALESCE(session_id, '') = COALESCE(?, '')
+        """
+        params: list[Any] = [session_id]
+
+        if project_path:
+            sql += " AND (project_path = ? OR project_path IS NULL)"
+            params.append(project_path)
+
+        if kind_filter:
+            placeholders = ", ".join("?" for _ in kind_filter)
+            sql += f" AND memory_kind IN ({placeholders})"
+            params.extend(sorted(kind_filter))
+
+        sql, params = self._append_token_filter(
+            sql,
+            params,
+            tokens,
+            ["category", "key", "value", "evidence", "tags", "COALESCE(project_path, '')", "memory_kind"],
+        )
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(candidate_limit)
+
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            self._build_search_result(
+                source_table="memory_candidates",
+                row=row,
+                key=str(row["key"]),
+                text=str(row["value"]),
+                query=query,
+                tokens=tokens,
+                review_state=str(row["status"]),
             )
             for row in rows
         ]
@@ -1348,6 +1960,8 @@ class KnowledgeStore:
         query: str,
         tokens: list[str],
         legacy_fact_id: int | None = None,
+        review_state: str = "approved",
+        pinned: bool | None = None,
     ) -> MemorySearchResult:
         result = MemorySearchResult(
             id=int(row["id"]),
@@ -1365,6 +1979,8 @@ class KnowledgeStore:
             updated_at=str(row["updated_at"]),
             last_used_at=row["last_used_at"],
             legacy_fact_id=legacy_fact_id,
+            review_state=review_state,
+            pinned=bool(row["pinned"]) if pinned is None and "pinned" in row.keys() else bool(pinned),
             score=0.0,
         )
         result.score = self._score_search_result(result, query, tokens)
@@ -1419,7 +2035,56 @@ class KnowledgeStore:
         elif result.memory_kind == "session_summary":
             score += 0.3
 
+        if result.source_table == "memory_candidates":
+            score += 0.6
+        if result.pinned:
+            score += 0.5
+
         return score
+
+    def _match_durable_memory(
+        self,
+        memories: Iterable[DurableMemory],
+        *,
+        category: str,
+        key: str,
+        value: str,
+    ) -> DurableMemory | None:
+        best: DurableMemory | None = None
+        best_score = 0.0
+        for memory in memories:
+            score = 0.0
+            if memory.key == key:
+                score += 1.0
+            score += _similarity(memory.value, value)
+            if memory.category == category:
+                score += 0.15
+            if score > best_score:
+                best_score = score
+                best = memory
+        return best if best_score >= 0.9 else None
+
+    def _match_memory_candidate(
+        self,
+        candidates: Iterable[MemoryCandidateRecord],
+        *,
+        category: str,
+        key: str,
+        value: str,
+    ) -> MemoryCandidateRecord | None:
+        best: MemoryCandidateRecord | None = None
+        best_score = 0.0
+        for candidate in candidates:
+            score = 0.0
+            if candidate.key == key:
+                score += 1.0
+            score += _similarity(candidate.value, value)
+            if candidate.category == category:
+                score += 0.15
+            if score > best_score:
+                best_score = score
+                best = candidate
+        return best if best_score >= 0.9 else None
 
     def _touch_search_results(self, results: list[MemorySearchResult]) -> None:
         if not results:
@@ -1676,7 +2341,37 @@ class KnowledgeStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_used_at=row["last_used_at"],
+            pinned=bool(row["pinned"]),
+            pinned_at=row["pinned_at"],
             legacy_fact_id=row["legacy_fact_id"],
+        )
+
+    @staticmethod
+    def _row_to_memory_candidate(row: sqlite3.Row | None) -> MemoryCandidateRecord | None:
+        if row is None:
+            return None
+        return MemoryCandidateRecord(
+            id=row["id"],
+            session_id=row["session_id"],
+            memory_kind=row["memory_kind"],
+            category=row["category"],
+            key=row["key"],
+            value=row["value"],
+            evidence=row["evidence"],
+            tags=_json_loads_list(row["tags"]),
+            confidence=float(row["confidence"]),
+            salience=float(row["salience"]),
+            source=row["source"],
+            project_path=row["project_path"],
+            status=row["status"],
+            review_note=row["review_note"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_used_at=row["last_used_at"],
+            reviewed_at=row["reviewed_at"],
+            expires_at=row["expires_at"],
+            existing_memory_id=row["existing_memory_id"],
+            promoted_memory_id=row["promoted_memory_id"],
         )
 
     @staticmethod

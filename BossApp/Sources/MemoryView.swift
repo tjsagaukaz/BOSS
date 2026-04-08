@@ -3,6 +3,10 @@ import SwiftUI
 struct MemoryView: View {
     @EnvironmentObject var vm: ChatViewModel
     @State private var expandedProjectIDs: Set<String> = []
+    @State private var editingCandidateIDs: Set<Int> = []
+    @State private var candidateDraftLabels: [Int: String] = [:]
+    @State private var candidateDraftTexts: [Int: String] = [:]
+    @State private var candidateDraftEvidence: [Int: String] = [:]
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -19,6 +23,12 @@ struct MemoryView: View {
                 if let overview = vm.memoryOverview {
                     VStack(alignment: .leading, spacing: 24) {
                         scanStatusCard(overview.scanStatus)
+
+                        governanceCard(overview.governance)
+
+                        if !overview.pendingCandidates.isEmpty {
+                            pendingCandidatesSection(overview.pendingCandidates)
+                        }
 
                         if let currentTurn = overview.currentTurnMemory {
                             currentTurnSection(currentTurn)
@@ -189,13 +199,24 @@ struct MemoryView: View {
     private func memoryReasonRow(_ reason: MemoryInjectionReason) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text(reason.key)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(Color.white.opacity(0.88))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(reason.key)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color.white.opacity(0.88))
+
+                        if reason.reviewState == "pending" {
+                            statusPill("Pending review")
+                        }
+                        if reason.pinned {
+                            statusPill("Pinned")
+                        }
+                    }
+                }
 
                 Spacer()
 
-                if reason.deletable {
+                if reason.deletable && reason.sourceTable != "memory_candidates" {
                     Button(action: { vm.forgetMemory(sourceTable: reason.sourceTable, itemId: reason.memoryId) }) {
                         Text("Forget")
                             .font(.system(size: 12))
@@ -212,6 +233,247 @@ struct MemoryView: View {
             Text(reason.why)
                 .font(.system(size: 11))
                 .foregroundColor(Color.white.opacity(0.32))
+        }
+        .padding(.vertical, 12)
+    }
+
+    private func governanceCard(_ governance: MemoryGovernanceInfo) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Memory Governance")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.9))
+
+                    Text(governance.autoApproveEnabled
+                         ? String(format: "Auto-approve enabled at %.2f confidence", governance.autoApproveMinConfidence)
+                         : "Cross-session memory requires review before it becomes durable")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.34))
+                }
+
+                Spacer()
+            }
+
+            HStack(spacing: 24) {
+                scanMetric("Pending", value: governance.pendingCandidates)
+                scanMetric("Pinned", value: governance.pinnedMemories)
+                scanMetric("Approved", value: vm.memoryOverview?.recentMemories.count ?? 0)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.03))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
+    }
+
+    private func pendingCandidatesSection(_ candidates: [MemoryCandidateInfo]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionTitle("Pending Review", subtitle: "Session-local memories waiting for durable approval")
+                .padding(.bottom, 10)
+
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
+                    pendingCandidateRow(candidate)
+
+                    if index < candidates.count - 1 {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.05))
+                            .frame(height: 1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func pendingCandidateRow(_ candidate: MemoryCandidateInfo) -> some View {
+        let isEditing = editingCandidateIDs.contains(candidate.candidateId)
+        let labelBinding = Binding<String>(
+            get: { candidateDraftLabels[candidate.candidateId] ?? candidate.label },
+            set: { candidateDraftLabels[candidate.candidateId] = $0 }
+        )
+        let textBinding = Binding<String>(
+            get: { candidateDraftTexts[candidate.candidateId] ?? candidate.text },
+            set: { candidateDraftTexts[candidate.candidateId] = $0 }
+        )
+        let evidenceBinding = Binding<String>(
+            get: { candidateDraftEvidence[candidate.candidateId] ?? candidate.evidence },
+            set: { candidateDraftEvidence[candidate.candidateId] = $0 }
+        )
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(candidate.label)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.9))
+
+                statusPill(candidate.proposedAction == "update" ? "Update" : "New")
+
+                Spacer()
+
+                if let updatedAt = candidate.updatedAt {
+                    Text("Updated \(relativeDate(updatedAt))")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color.white.opacity(0.3))
+                }
+            }
+
+            if let existingText = candidate.existingText {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Current approved memory")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Color.white.opacity(0.28))
+                        .tracking(1.0)
+
+                    Text(existingText)
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.42))
+                }
+            }
+
+            if isEditing {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Label", text: labelBinding)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .foregroundColor(Color.white.opacity(0.84))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.04))
+                        )
+
+                    TextEditor(text: textBinding)
+                        .font(.system(size: 13))
+                        .foregroundColor(Color.white.opacity(0.8))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 72)
+                        .padding(6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.04))
+                        )
+
+                    TextEditor(text: evidenceBinding)
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.68))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 54)
+                        .padding(6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.white.opacity(0.03))
+                        )
+                }
+            } else {
+                Text(candidate.text)
+                    .font(.system(size: 13))
+                    .foregroundColor(Color.white.opacity(0.58))
+
+                if !candidate.evidence.isEmpty {
+                    Text("Source: \(candidate.evidence)")
+                        .font(.system(size: 12))
+                        .foregroundColor(Color.white.opacity(0.34))
+                }
+            }
+
+            HStack(spacing: 10) {
+                Text(candidate.memoryKind.replacingOccurrences(of: "_", with: " ").capitalized)
+                Text(String(format: "Confidence %.2f", candidate.confidence))
+                if let sessionId = candidate.sessionId {
+                    Text("Session \(String(sessionId.prefix(8)))")
+                }
+                if let projectPath = candidate.projectPath {
+                    Text(projectPath)
+                }
+            }
+            .font(.system(size: 11))
+            .foregroundColor(Color.white.opacity(0.3))
+
+            HStack(spacing: 12) {
+                if isEditing {
+                    Button(action: {
+                        vm.saveMemoryCandidate(
+                            candidateId: candidate.candidateId,
+                            label: labelBinding.wrappedValue,
+                            text: textBinding.wrappedValue,
+                            evidence: evidenceBinding.wrappedValue
+                        )
+                    }) {
+                        Text("Save")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.white.opacity(0.68))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        vm.approveMemoryCandidate(
+                            candidateId: candidate.candidateId,
+                            label: labelBinding.wrappedValue,
+                            text: textBinding.wrappedValue,
+                            evidence: evidenceBinding.wrappedValue
+                        )
+                        clearCandidateDraft(candidate.candidateId)
+                    }) {
+                        Text("Approve")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(Color.white.opacity(0.88))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        clearCandidateDraft(candidate.candidateId)
+                    }) {
+                        Text("Cancel")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.white.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: {
+                        vm.approveMemoryCandidate(
+                            candidateId: candidate.candidateId,
+                            label: candidate.label,
+                            text: candidate.text,
+                            evidence: candidate.evidence
+                        )
+                    }) {
+                        Text("Approve")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(Color.white.opacity(0.88))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: {
+                        beginEditing(candidate)
+                    }) {
+                        Text("Edit")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.white.opacity(0.64))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: { vm.rejectMemoryCandidate(candidateId: candidate.candidateId) }) {
+                        Text("Reject")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.white.opacity(0.56))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(action: { vm.expireMemoryCandidate(candidateId: candidate.candidateId) }) {
+                        Text("Expire")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.white.opacity(0.46))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
         .padding(.vertical, 12)
     }
@@ -238,11 +500,26 @@ struct MemoryView: View {
     private func memoryRow(_ item: MemoryRecord) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
-                Text(item.label)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundColor(Color.white.opacity(0.9))
+                HStack(spacing: 8) {
+                    Text(item.label)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.9))
+
+                    if item.pinned {
+                        statusPill("Pinned")
+                    }
+                }
 
                 Spacer()
+
+                if item.sourceTable == "durable_memories" {
+                    Button(action: { vm.setMemoryPinned(itemId: item.memoryId, pinned: !item.pinned) }) {
+                        Text(item.pinned ? "Unpin" : "Pin")
+                            .font(.system(size: 12))
+                            .foregroundColor(Color.white.opacity(0.54))
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 if item.deletable {
                     Button(action: { vm.forgetMemory(sourceTable: item.sourceTable, itemId: item.memoryId) }) {
@@ -400,6 +677,18 @@ struct MemoryView: View {
         }
     }
 
+    private func statusPill(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(Color.white.opacity(0.72))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule()
+                    .fill(Color.white.opacity(0.07))
+            )
+    }
+
     private func orderedProjectSummaries(_ overview: MemoryOverview) -> [ProjectSummaryInfo] {
         guard let selected = vm.selectedProjectPath else {
             return overview.projectSummaries
@@ -419,6 +708,20 @@ struct MemoryView: View {
             return codables.compactMap { $0.value as? String }
         }
         return []
+    }
+
+    private func beginEditing(_ candidate: MemoryCandidateInfo) {
+        editingCandidateIDs.insert(candidate.candidateId)
+        candidateDraftLabels[candidate.candidateId] = candidate.label
+        candidateDraftTexts[candidate.candidateId] = candidate.text
+        candidateDraftEvidence[candidate.candidateId] = candidate.evidence
+    }
+
+    private func clearCandidateDraft(_ candidateId: Int) {
+        editingCandidateIDs.remove(candidateId)
+        candidateDraftLabels.removeValue(forKey: candidateId)
+        candidateDraftTexts.removeValue(forKey: candidateId)
+        candidateDraftEvidence.removeValue(forKey: candidateId)
     }
 
     private func relativeDate(_ date: Date) -> String {

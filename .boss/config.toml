@@ -1,0 +1,37 @@
+version = 1
+
+[mode]
+default = "agent"
+allow_explicit_override = true
+
+[permissions]
+default_policy = "prompt"
+respect_bossignore = true
+announce_restricted_actions = true
+
+[indexing]
+respect_bossindexignore = true
+include_boss_control_files = false
+
+[memory]
+auto_injection = true
+auto_distillation = true
+auto_approve = false
+auto_approve_min_confidence = 0.98
+
+[jobs]
+branch_behavior = "suggest"
+takeover_cancels_background = true
+
+[review]
+mode_name = "review"
+findings_first = true
+require_file_references = true
+auto_activate = true
+auto_mode_keywords = [
+  "review",
+  "code review",
+  "audit",
+  "security review",
+  "architecture review",
+]

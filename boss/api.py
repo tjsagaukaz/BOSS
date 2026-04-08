@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -13,7 +14,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents import Runner
 from agents.exceptions import (
@@ -38,6 +39,14 @@ from openai.types.responses import ResponseTextDeltaEvent
 from boss import __version__
 from boss.agents import build_entry_agent
 from boss.config import settings
+from boss.control import (
+    jobs_branch_behavior,
+    jobs_takeover_cancels_background,
+    load_boss_control,
+    memory_auto_approve_enabled,
+    memory_auto_approve_min_confidence,
+    resolve_request_mode,
+)
 from boss.context.manager import SessionContextManager
 from boss.execution import (
     ExecutionType,
@@ -58,8 +67,28 @@ from boss.execution import (
     save_pending_run,
     store_permission_rule,
 )
+from boss.jobs import (
+    BackgroundJobStatus,
+    append_background_job_log,
+    create_background_job,
+    is_background_job_terminal,
+    list_background_jobs,
+    load_background_job,
+    prepare_task_branch,
+    recover_interrupted_background_jobs,
+    summarize_background_job,
+    tail_background_job_log,
+    update_background_job,
+)
 from boss.memory.injection import build_memory_injection
 from boss.memory.knowledge import get_knowledge_store
+from boss.review import (
+    ReviewRequest as ReviewRunRequestPayload,
+    list_review_history,
+    load_review_record,
+    review_capabilities,
+    run_review,
+)
 from boss.observability import (
     log_agent_change,
     log_memory_distillation,
@@ -96,6 +125,7 @@ app.add_middleware(
 )
 
 session_context_manager = SessionContextManager()
+background_job_tasks: dict[str, asyncio.Task[Any]] = {}
 
 
 # --- Request / Response models ---
@@ -103,6 +133,7 @@ session_context_manager = SessionContextManager()
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+    mode: str = "agent"
 
 
 class FactRequest(BaseModel):
@@ -115,6 +146,40 @@ class PermissionDecisionRequest(BaseModel):
     run_id: str
     approval_id: str
     decision: PermissionDecision
+
+
+class MemoryCandidateUpdateRequest(BaseModel):
+    key: str | None = None
+    value: str | None = None
+    evidence: str | None = None
+
+
+class MemoryCandidateApproveRequest(BaseModel):
+    key: str | None = None
+    value: str | None = None
+    evidence: str | None = None
+    pin: bool = False
+    review_note: str | None = None
+
+
+class MemoryCandidateStatusRequest(BaseModel):
+    review_note: str | None = None
+
+
+class ReviewRunRequest(BaseModel):
+    target: str = "auto"
+    project_path: str | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
+    file_paths: list[str] = Field(default_factory=list)
+
+
+class BackgroundJobCreateRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+    mode: str = "agent"
+    project_path: str | None = None
+    branch_mode: str | None = None
 
 
 def _iso_timestamp(value: float | None) -> str | None:
@@ -130,6 +195,18 @@ def sse_event(data: dict, event: str | None = None) -> str:
     if event:
         return f"event: {event}\ndata: {payload}\n\n"
     return f"data: {payload}\n\n"
+
+
+def _decode_sse_payload(chunk: str) -> dict[str, Any] | None:
+    for line in chunk.splitlines():
+        if not line.startswith("data: "):
+            continue
+        try:
+            payload = json.loads(line[6:])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
 
 
 def _error_stream_response(message: str, *, session_id: str | None = None) -> StreamingResponse:
@@ -148,6 +225,91 @@ def _clip_text(text: str, limit: int = 220) -> str:
     if len(stripped) <= limit:
         return stripped
     return stripped[: limit - 3].rstrip() + "..."
+
+
+def _job_log_message(payload: dict[str, Any]) -> str:
+    event_type = payload.get("type")
+    if event_type == "session":
+        return f"Attached to session {payload.get('session_id', '')}".strip()
+    if event_type == "agent":
+        return f"Active agent: {payload.get('name', 'unknown')}"
+    if event_type == "handoff":
+        return f"Handoff {payload.get('from', '?')} -> {payload.get('to', '?')}"
+    if event_type == "tool_call":
+        title = payload.get("title") or payload.get("name") or "Tool"
+        description = payload.get("description") or ""
+        return f"{title}: {description}" if description else str(title)
+    if event_type == "tool_result":
+        return _clip_text(str(payload.get("output", "")) or "Tool completed.", 240)
+    if event_type == "permission_request":
+        return f"Waiting for permission: {payload.get('title', payload.get('tool', 'tool'))}"
+    if event_type == "permission_result":
+        return f"Permission decision: {payload.get('decision', 'unknown')}"
+    if event_type == "thinking":
+        return _clip_text(str(payload.get("content", "")), 240)
+    if event_type == "text":
+        return _clip_text(str(payload.get("content", "")), 240)
+    if event_type == "error":
+        return str(payload.get("message", "Unexpected error"))
+    if event_type == "done":
+        return "Background job completed."
+    return _clip_text(json.dumps(payload, ensure_ascii=False), 240)
+
+
+def _serialize_job_approval(approval: Any) -> dict[str, Any]:
+    return {
+        "approval_id": approval.approval_id,
+        "tool_name": approval.tool_name,
+        "title": approval.title,
+        "description": approval.description,
+        "execution_type": approval.execution_type,
+        "scope_label": approval.scope_label,
+        "requested_at": _iso_timestamp(approval.requested_at),
+        "expires_at": _iso_timestamp(approval.expires_at),
+        "status": approval.status,
+    }
+
+
+def _job_approvals_payload(job: Any) -> list[dict[str, Any]]:
+    if not job.pending_run_id:
+        return []
+    pending = load_pending_run(job.pending_run_id) or load_expired_pending_run(job.pending_run_id)
+    if pending is None:
+        return []
+    return [_serialize_job_approval(approval) for approval in pending.approvals]
+
+
+def _job_detail_payload(job: Any) -> dict[str, Any]:
+    payload = summarize_background_job(job)
+    payload["active"] = job.job_id in background_job_tasks
+    payload["approvals"] = _job_approvals_payload(job)
+    return payload
+
+
+def _takeover_messages_for_job(job: Any) -> list[dict[str, str]]:
+    session = session_context_manager.load_session_read_only(job.session_id)
+    messages = extract_display_messages(session)
+    if job.session_persisted:
+        return messages
+
+    if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != job.prompt:
+        messages.append({"role": "user", "content": job.prompt})
+
+    preview = job.assistant_preview.strip()
+    if preview and (not messages or messages[-1].get("role") != "assistant" or messages[-1].get("content") != preview):
+        messages.append({"role": "assistant", "content": preview})
+
+    return messages
+
+
+def _build_takeover_payload(job: Any) -> dict[str, Any]:
+    return {
+        "job": _job_detail_payload(job),
+        "session_id": job.session_id,
+        "mode": job.mode,
+        "project_path": job.project_path,
+        "messages": _takeover_messages_for_job(job),
+    }
 
 
 def _tokenize_query(text: str) -> list[str]:
@@ -178,6 +340,7 @@ def _serialize_memory_record(
     salience: float,
     tags: list[str],
     deletable: bool,
+    pinned: bool = False,
 ) -> dict[str, Any]:
     return {
         "source_table": source_table,
@@ -194,6 +357,33 @@ def _serialize_memory_record(
         "salience": salience,
         "tags": tags,
         "deletable": deletable,
+        "pinned": pinned,
+    }
+
+
+def _serialize_memory_candidate_record(item: Any, existing_memory: Any | None = None) -> dict[str, Any]:
+    return {
+        "candidate_id": item.id,
+        "status": item.status,
+        "memory_kind": item.memory_kind,
+        "category": item.category,
+        "label": item.key,
+        "text": item.value,
+        "evidence": item.evidence,
+        "source": item.source,
+        "project_path": item.project_path,
+        "session_id": item.session_id,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "expires_at": item.expires_at,
+        "confidence": item.confidence,
+        "salience": item.salience,
+        "tags": item.tags,
+        "existing_memory_id": item.existing_memory_id,
+        "promoted_memory_id": item.promoted_memory_id,
+        "proposed_action": "update" if item.existing_memory_id else "create",
+        "existing_label": existing_memory.key if existing_memory is not None else None,
+        "existing_text": existing_memory.value if existing_memory is not None else None,
     }
 
 
@@ -234,6 +424,10 @@ def _serialize_injection_reason(result: Any, query: str) -> dict[str, Any]:
 
     if result.last_used_at:
         reasons.append("Recently used")
+    if result.review_state == "pending":
+        reasons.append("Session-local pending memory")
+    if result.pinned:
+        reasons.append("Pinned memory")
 
     summary = ", ".join(dict.fromkeys(reasons[:4])) or "Relevant ranked memory"
     return {
@@ -246,7 +440,9 @@ def _serialize_injection_reason(result: Any, query: str) -> dict[str, Any]:
         "project_path": result.project_path,
         "score": round(float(result.score), 2),
         "why": f"{summary} (score {result.score:.2f})",
-        "deletable": result.source_table in {"durable_memories", "project_notes", "conversation_episodes"},
+        "deletable": result.source_table in {"durable_memories", "project_notes", "conversation_episodes", "memory_candidates"},
+        "review_state": result.review_state,
+        "pinned": result.pinned,
     }
 
 
@@ -282,6 +478,7 @@ def _memory_overview_payload(*, session_id: str | None = None, message: str | No
             salience=item.salience,
             tags=item.tags,
             deletable=True,
+            pinned=item.pinned,
         )
         for item in store.list_durable_memories(memory_kind="user_profile", limit=12)
     ]
@@ -302,6 +499,7 @@ def _memory_overview_payload(*, session_id: str | None = None, message: str | No
             salience=item.salience,
             tags=item.tags,
             deletable=True,
+            pinned=item.pinned,
         )
         for item in store.list_durable_memories(memory_kind="preference", limit=12)
     ]
@@ -322,8 +520,19 @@ def _memory_overview_payload(*, session_id: str | None = None, message: str | No
             salience=item.salience,
             tags=item.tags,
             deletable=True,
+            pinned=item.pinned,
         )
         for item in store.list_durable_memories(limit=16)
+    ]
+
+    pending_candidates_raw = store.list_memory_candidates(status="pending", limit=24)
+    existing_memories = {
+        item.id: item
+        for item in store.list_durable_memories(limit=200)
+    }
+    pending_candidates = [
+        _serialize_memory_candidate_record(item, existing_memories.get(item.existing_memory_id))
+        for item in pending_candidates_raw
     ]
 
     conversation_summaries = [
@@ -394,6 +603,13 @@ def _memory_overview_payload(*, session_id: str | None = None, message: str | No
         "user_profile": profile,
         "preferences": preferences,
         "recent_memories": recent_memories,
+        "pending_candidates": pending_candidates,
+        "governance": {
+            "pending_candidates": stats.get("pending_memory_candidates", 0),
+            "pinned_memories": stats.get("pinned_durable_memories", 0),
+            "auto_approve_enabled": memory_auto_approve_enabled(),
+            "auto_approve_min_confidence": memory_auto_approve_min_confidence(),
+        },
         "conversation_summaries": conversation_summaries,
         "project_summaries": project_summaries,
         "scan_status": {
@@ -537,8 +753,9 @@ async def _stream_chat_run(
     emit_session: bool,
     pending_run_id: str | None = None,
     initial_event: dict[str, Any] | None = None,
+    mode: str | None = None,
 ):
-    agent = build_entry_agent()
+    agent = build_entry_agent(mode=mode)
     current_input = run_input
     sent_session = False
     emitted_initial = False
@@ -551,7 +768,7 @@ async def _stream_chat_run(
     execution_options = build_run_execution_options(
         session_id=session_id,
         workflow_name="Boss API Chat",
-        trace_metadata={"surface": "api", "session_id": session_id},
+        trace_metadata={"surface": "api", "session_id": session_id, "mode": mode or "default"},
     )
 
     try:
@@ -636,6 +853,7 @@ async def _stream_chat_run(
                         state=state.to_json(),
                         approvals=unresolved,
                         run_id=pending_run_id,
+                        mode=mode,
                     )
                     for approval in unresolved:
                         log_permission_event(
@@ -683,11 +901,212 @@ async def _stream_chat_run(
         reset_log_context(context_tokens)
 
 
+async def _cancel_background_job(job_id: str, *, final_status: str, reason: str) -> Any:
+    job = load_background_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Background job not found")
+
+    job = update_background_job(
+        job_id,
+        status=final_status,
+        latest_event=reason,
+        cancellation_requested_at=datetime.now(timezone.utc).isoformat(),
+        finished_at=datetime.now(timezone.utc).isoformat() if job.status == BackgroundJobStatus.WAITING_PERMISSION.value else job.finished_at,
+    )
+    append_background_job_log(job_id, event_type=final_status, message=reason)
+
+    if job.pending_run_id and final_status == BackgroundJobStatus.CANCELLED.value:
+        delete_pending_run(job.pending_run_id)
+        job = update_background_job(job_id, pending_run_id=None)
+
+    task = background_job_tasks.get(job_id)
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        job = load_background_job(job_id) or job
+
+    return job
+
+
+async def _run_background_job(
+    *,
+    job_id: str,
+    run_input: Any,
+    session_id: str,
+    mode: str,
+    emit_session: bool,
+    pending_run_id: str | None = None,
+    is_resume: bool = False,
+) -> None:
+    job = load_background_job(job_id)
+    if job is None:
+        return
+
+    started_at = job.started_at or datetime.now(timezone.utc).isoformat()
+    job = update_background_job(
+        job_id,
+        status=BackgroundJobStatus.RUNNING.value,
+        started_at=started_at,
+        finished_at=None,
+        error_message=None,
+        pending_run_id=pending_run_id,
+        latest_event="Background job is running.",
+        resume_count=job.resume_count + (1 if is_resume else 0),
+    )
+    append_background_job_log(job_id, event_type="job_started", message="Background job execution started.")
+
+    assistant_preview = job.assistant_preview
+    last_saved_preview = assistant_preview
+    encountered_error: str | None = None
+    waiting_for_permission = False
+    completed = False
+
+    try:
+        async for chunk in _stream_chat_run(
+            run_input=run_input,
+            session_id=session_id,
+            emit_session=emit_session,
+            pending_run_id=pending_run_id,
+            mode=mode,
+        ):
+            payload = _decode_sse_payload(chunk)
+            if payload is None:
+                continue
+
+            event_type = str(payload.get("type", "event"))
+            append_background_job_log(
+                job_id,
+                event_type=event_type,
+                message=_job_log_message(payload),
+                payload=payload,
+            )
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if event_type == "session" and payload.get("session_id"):
+                session_id = str(payload.get("session_id"))
+                update_background_job(job_id, session_id=session_id, last_event_at=now_iso)
+                continue
+
+            if event_type == "text":
+                assistant_preview = _clip_text(assistant_preview + str(payload.get("content", "")), 12_000)
+                should_flush = abs(len(assistant_preview) - len(last_saved_preview)) >= 240 or assistant_preview.endswith(("\n", ".", "!", "?"))
+                if should_flush:
+                    update_background_job(
+                        job_id,
+                        assistant_preview=assistant_preview,
+                        last_event_at=now_iso,
+                        latest_event="Streaming assistant output.",
+                    )
+                    last_saved_preview = assistant_preview
+                continue
+
+            if event_type == "permission_request":
+                waiting_for_permission = True
+                update_background_job(
+                    job_id,
+                    status=BackgroundJobStatus.WAITING_PERMISSION.value,
+                    pending_run_id=str(payload.get("run_id") or pending_run_id or ""),
+                    assistant_preview=assistant_preview,
+                    last_event_at=now_iso,
+                    latest_event=_job_log_message(payload),
+                )
+                return
+
+            if event_type == "error":
+                encountered_error = str(payload.get("message", "Unexpected error"))
+                update_background_job(
+                    job_id,
+                    assistant_preview=assistant_preview,
+                    last_event_at=now_iso,
+                    latest_event=encountered_error,
+                    error_message=encountered_error,
+                )
+                continue
+
+            if event_type == "done":
+                completed = True
+                continue
+
+            update_background_job(
+                job_id,
+                assistant_preview=assistant_preview,
+                last_event_at=now_iso,
+                latest_event=_job_log_message(payload),
+            )
+
+        if waiting_for_permission:
+            return
+
+        finished_at = datetime.now(timezone.utc).isoformat()
+        if encountered_error:
+            update_background_job(
+                job_id,
+                status=BackgroundJobStatus.FAILED.value,
+                finished_at=finished_at,
+                assistant_preview=assistant_preview,
+                latest_event=encountered_error,
+                error_message=encountered_error,
+            )
+            return
+
+        if completed:
+            update_background_job(
+                job_id,
+                status=BackgroundJobStatus.COMPLETED.value,
+                finished_at=finished_at,
+                pending_run_id=None,
+                assistant_preview=assistant_preview,
+                latest_event="Background job completed.",
+                session_persisted=True,
+            )
+            return
+
+        update_background_job(
+            job_id,
+            status=BackgroundJobStatus.INTERRUPTED.value,
+            finished_at=finished_at,
+            assistant_preview=assistant_preview,
+            latest_event="Background job stopped unexpectedly.",
+            error_message="Background job stopped without a terminal event.",
+        )
+    except asyncio.CancelledError:
+        current = load_background_job(job_id)
+        if current is not None:
+            final_status = current.status if current.status in {BackgroundJobStatus.CANCELLED.value, BackgroundJobStatus.TAKEN_OVER.value} else BackgroundJobStatus.CANCELLED.value
+            latest_event = "Taken over into the foreground chat." if final_status == BackgroundJobStatus.TAKEN_OVER.value else "Background job cancelled."
+            update_background_job(
+                job_id,
+                status=final_status,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                assistant_preview=current.assistant_preview,
+                latest_event=latest_event,
+                pending_run_id=None if final_status == BackgroundJobStatus.CANCELLED.value else current.pending_run_id,
+            )
+            append_background_job_log(job_id, event_type=final_status, message=latest_event)
+        raise
+    except Exception as exc:
+        logger.exception("Unexpected error in background job %s", job_id)
+        update_background_job(
+            job_id,
+            status=BackgroundJobStatus.FAILED.value,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            latest_event=str(exc),
+            error_message=str(exc),
+        )
+        append_background_job_log(job_id, event_type="error", message=str(exc))
+    finally:
+        background_job_tasks.pop(job_id, None)
+
+
 # --- Chat endpoint with SSE streaming ---
 
 @app.post("/api/chat")
 async def chat_endpoint(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
+    resolved_mode = resolve_request_mode(req.message, explicit_mode=req.mode)
 
     danger = is_obviously_dangerous(req.message)
     if danger:
@@ -710,6 +1129,7 @@ async def chat_endpoint(req: ChatRequest):
             run_input=prepared_input,
             session_id=session_id,
             emit_session=True,
+            mode=resolved_mode,
         ),
         media_type="text/event-stream",
     )
@@ -727,7 +1147,7 @@ async def permission_decision_endpoint(req: PermissionDecisionRequest):
             )
         return _error_stream_response("Pending run not found.")
 
-    agent = build_entry_agent()
+    agent = build_entry_agent(mode=record.mode)
     state = await RunState.from_json(agent, record.state)
     interruption = _find_interruption(state, req.approval_id)
     if interruption is None:
@@ -794,6 +1214,7 @@ async def permission_decision_endpoint(req: PermissionDecisionRequest):
             session_id=record.session_id,
             emit_session=False,
             pending_run_id=req.run_id,
+            mode=record.mode,
             initial_event={
                 "type": "permission_result",
                 "approval_id": approval.approval_id,
@@ -902,6 +1323,317 @@ async def memory_overview(session_id: str | None = None, message: str | None = N
     return _memory_overview_payload(session_id=session_id, message=message)
 
 
+@app.get("/api/memory/candidates")
+async def list_memory_candidates(status: str | None = "pending"):
+    store = get_knowledge_store()
+    items = store.list_memory_candidates(status=status, limit=100)
+    existing_memories = {
+        item.id: item
+        for item in store.list_durable_memories(limit=200)
+    }
+    return [
+        _serialize_memory_candidate_record(item, existing_memories.get(item.existing_memory_id))
+        for item in items
+    ]
+
+
+@app.patch("/api/memory/candidates/{candidate_id}")
+async def update_memory_candidate(candidate_id: int, req: MemoryCandidateUpdateRequest):
+    store = get_knowledge_store()
+    candidate = store.update_memory_candidate(
+        candidate_id,
+        key=req.key,
+        value=req.value,
+        evidence=req.evidence,
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Pending memory candidate not found")
+    existing_memory = store.get_durable_memory(candidate.existing_memory_id) if candidate.existing_memory_id else None
+    return _serialize_memory_candidate_record(candidate, existing_memory)
+
+
+@app.post("/api/memory/candidates/{candidate_id}/approve")
+async def approve_memory_candidate(candidate_id: int, req: MemoryCandidateApproveRequest):
+    store = get_knowledge_store()
+    try:
+        memory = store.approve_memory_candidate(
+            candidate_id,
+            key=req.key,
+            value=req.value,
+            evidence=req.evidence,
+            pin=req.pin,
+            review_note=req.review_note,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    return _serialize_memory_record(
+        source_table="durable_memories",
+        memory_id=memory.id,
+        memory_kind=memory.memory_kind,
+        category=memory.category,
+        label=memory.key,
+        text=memory.value,
+        source=memory.source,
+        project_path=memory.project_path,
+        updated_at=memory.updated_at,
+        last_used_at=memory.last_used_at,
+        confidence=memory.confidence,
+        salience=memory.salience,
+        tags=memory.tags,
+        deletable=True,
+        pinned=memory.pinned,
+    )
+
+
+@app.post("/api/memory/candidates/{candidate_id}/reject")
+async def reject_memory_candidate(candidate_id: int, req: MemoryCandidateStatusRequest):
+    store = get_knowledge_store()
+    candidate = store.reject_memory_candidate(candidate_id, review_note=req.review_note)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Pending memory candidate not found")
+    existing_memory = store.get_durable_memory(candidate.existing_memory_id) if candidate.existing_memory_id else None
+    return _serialize_memory_candidate_record(candidate, existing_memory)
+
+
+@app.post("/api/memory/candidates/{candidate_id}/expire")
+async def expire_memory_candidate(candidate_id: int, req: MemoryCandidateStatusRequest):
+    store = get_knowledge_store()
+    candidate = store.expire_memory_candidate(candidate_id, review_note=req.review_note)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Pending memory candidate not found")
+    existing_memory = store.get_durable_memory(candidate.existing_memory_id) if candidate.existing_memory_id else None
+    return _serialize_memory_candidate_record(candidate, existing_memory)
+
+
+@app.post("/api/memory/items/durable_memories/{item_id}/pin")
+async def pin_memory_item(item_id: int):
+    store = get_knowledge_store()
+    memory = store.set_durable_memory_pinned(item_id, pinned=True)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Durable memory not found")
+    return {"status": "pinned", "memory_id": memory.id}
+
+
+@app.post("/api/memory/items/durable_memories/{item_id}/unpin")
+async def unpin_memory_item(item_id: int):
+    store = get_knowledge_store()
+    memory = store.set_durable_memory_pinned(item_id, pinned=False)
+    if memory is None:
+        raise HTTPException(status_code=404, detail="Durable memory not found")
+    return {"status": "unpinned", "memory_id": memory.id}
+
+
+# --- Review endpoints ---
+
+@app.get("/api/review/capabilities")
+async def get_review_capabilities(project_path: str | None = None):
+    return review_capabilities(project_path)
+
+
+@app.get("/api/review/history")
+async def get_review_history(limit: int = 30):
+    safe_limit = max(1, min(limit, 100))
+    return [record.model_dump(mode="json") for record in list_review_history(limit=safe_limit)]
+
+
+@app.get("/api/review/history/{review_id}")
+async def get_review_record(review_id: str):
+    record = load_review_record(review_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Review record not found")
+    return record.model_dump(mode="json")
+
+
+@app.post("/api/review/run")
+async def run_review_endpoint(req: ReviewRunRequest):
+    try:
+        record = await run_review(
+            ReviewRunRequestPayload(
+                target=req.target,
+                project_path=req.project_path,
+                base_ref=req.base_ref,
+                head_ref=req.head_ref,
+                file_paths=tuple(req.file_paths),
+            )
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    return record.model_dump(mode="json")
+
+
+# --- Background job endpoints ---
+
+@app.get("/api/jobs")
+async def list_jobs(limit: int = 50):
+    safe_limit = max(1, min(limit, 200))
+    return [_job_detail_payload(job) for job in list_background_jobs(limit=safe_limit)]
+
+
+@app.post("/api/jobs")
+async def create_job_endpoint(req: BackgroundJobCreateRequest):
+    message = req.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Background jobs require a prompt.")
+
+    danger = is_obviously_dangerous(message)
+    if danger:
+        raise HTTPException(status_code=400, detail=danger)
+
+    session_id = req.session_id or str(uuid.uuid4())
+    resolved_mode = resolve_request_mode(message, explicit_mode=req.mode)
+    project_path = req.project_path or str(load_boss_control().root)
+    prepared_input = session_context_manager.prepare_input(session_id, message).model_input
+
+    branch_mode = (req.branch_mode or jobs_branch_behavior(project_path)).strip().lower()
+    branch_info = prepare_task_branch(prompt=message, project_path=project_path, branch_mode=branch_mode)
+
+    job = create_background_job(
+        prompt=message,
+        mode=resolved_mode,
+        session_id=session_id,
+        project_path=project_path,
+        initial_input_kind="prepared_input",
+        initial_input_payload=prepared_input,
+        branch_mode=branch_info.get("branch_mode"),
+        branch_name=branch_info.get("branch_name"),
+        task_slug=branch_info.get("task_slug"),
+        branch_status=branch_info.get("branch_status"),
+        branch_message=branch_info.get("branch_message"),
+        branch_helper_path=branch_info.get("branch_helper_path"),
+    )
+
+    task = asyncio.create_task(
+        _run_background_job(
+            job_id=job.job_id,
+            run_input=prepared_input,
+            session_id=session_id,
+            mode=resolved_mode,
+            emit_session=True,
+        ),
+        name=f"boss-background-{job.job_id}",
+    )
+    background_job_tasks[job.job_id] = task
+    return _job_detail_payload(load_background_job(job.job_id) or job)
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_endpoint(job_id: str):
+    job = load_background_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Background job not found")
+    return _job_detail_payload(job)
+
+
+@app.get("/api/jobs/{job_id}/logs")
+async def tail_job_logs(job_id: str, limit: int = 200):
+    job = load_background_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Background job not found")
+    safe_limit = max(20, min(limit, 500))
+    return tail_background_job_log(job_id, limit=safe_limit)
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job_endpoint(job_id: str):
+    job = load_background_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Background job not found")
+    if is_background_job_terminal(job.status):
+        return _job_detail_payload(job)
+
+    cancelled = await _cancel_background_job(
+        job_id,
+        final_status=BackgroundJobStatus.CANCELLED.value,
+        reason="Background job cancelled by the user.",
+    )
+    return _job_detail_payload(cancelled)
+
+
+@app.post("/api/jobs/{job_id}/resume")
+async def resume_job_endpoint(job_id: str):
+    job = load_background_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Background job not found")
+    if job.job_id in background_job_tasks:
+        raise HTTPException(status_code=409, detail="Background job is already running")
+    if job.status == BackgroundJobStatus.COMPLETED.value:
+        raise HTTPException(status_code=400, detail="Completed jobs cannot be resumed")
+
+    if job.pending_run_id:
+        pending = load_pending_run(job.pending_run_id)
+        if pending is None:
+            expired = load_expired_pending_run(job.pending_run_id)
+            if expired is not None:
+                message = "This background job was waiting on an approval that has expired. Start a new job or relaunch the task."
+            else:
+                message = "The pending approval state for this background job could not be found."
+            update_background_job(
+                job_id,
+                status=BackgroundJobStatus.INTERRUPTED.value,
+                pending_run_id=None,
+                latest_event=message,
+                error_message=message,
+            )
+            raise HTTPException(status_code=409, detail=message)
+
+        agent = build_entry_agent(mode=job.mode)
+        run_input = await RunState.from_json(agent, pending.state)
+        task = asyncio.create_task(
+            _run_background_job(
+                job_id=job.job_id,
+                run_input=run_input,
+                session_id=job.session_id,
+                mode=job.mode,
+                emit_session=False,
+                pending_run_id=job.pending_run_id,
+                is_resume=True,
+            ),
+            name=f"boss-background-{job.job_id}",
+        )
+        background_job_tasks[job.job_id] = task
+        return _job_detail_payload(load_background_job(job.job_id) or job)
+
+    task = asyncio.create_task(
+        _run_background_job(
+            job_id=job.job_id,
+            run_input=job.initial_input_payload,
+            session_id=job.session_id,
+            mode=job.mode,
+            emit_session=not job.session_persisted,
+            is_resume=True,
+        ),
+        name=f"boss-background-{job.job_id}",
+    )
+    background_job_tasks[job.job_id] = task
+    return _job_detail_payload(load_background_job(job.job_id) or job)
+
+
+@app.post("/api/jobs/{job_id}/takeover")
+async def takeover_job_endpoint(job_id: str):
+    job = load_background_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Background job not found")
+
+    if not is_background_job_terminal(job.status) and jobs_takeover_cancels_background(job.project_path):
+        job = await _cancel_background_job(
+            job_id,
+            final_status=BackgroundJobStatus.TAKEN_OVER.value,
+            reason="Background job taken over into the foreground chat.",
+        )
+    elif not is_background_job_terminal(job.status) and job.status != BackgroundJobStatus.TAKEN_OVER.value:
+        job = update_background_job(
+            job_id,
+            status=BackgroundJobStatus.TAKEN_OVER.value,
+            latest_event="Background job taken over into the foreground chat.",
+        )
+        append_background_job_log(job_id, event_type="taken_over", message="Background job taken over into the foreground chat.")
+
+    return _build_takeover_payload(load_background_job(job_id) or job)
+
+
 @app.delete("/api/memory/items/{source_table}/{item_id}")
 async def delete_memory_item(source_table: str, item_id: int):
     store = get_knowledge_store()
@@ -911,6 +1643,8 @@ async def delete_memory_item(source_table: str, item_id: int):
         deleted = store.delete_fact(item_id)
     elif normalized == "durable_memories":
         deleted = store.delete_durable_memory(item_id)
+    elif normalized == "memory_candidates":
+        deleted = store.delete_memory_candidate(item_id)
     elif normalized == "project_notes":
         deleted = store.delete_project_note(item_id)
     elif normalized == "conversation_episodes":
@@ -926,6 +1660,57 @@ async def delete_memory_item(source_table: str, item_id: int):
 
 # --- System ---
 
+def _boss_control_health(control: dict[str, Any]) -> dict[str, Any]:
+    files = control.get("files") or {}
+    required = {
+        "BOSS.md": files.get("BOSS.md") or {},
+        ".boss/config.toml": files.get("config") or {},
+    }
+    missing_files = [label for label, item in required.items() if not item.get("exists")]
+    rules_count = len(control.get("rules") or [])
+    rules_healthy = rules_count > 0
+    healthy = bool(control.get("configured")) and not missing_files and rules_healthy
+    return {
+        "configured": bool(control.get("configured")),
+        "healthy": healthy,
+        "rules_count": rules_count,
+        "rules_healthy": rules_healthy,
+        "missing_files": missing_files,
+        "default_mode": control.get("default_mode"),
+        "review_mode_name": control.get("review_mode_name"),
+    }
+
+
+def _diagnostics_summary(
+    *,
+    provider_mode: str,
+    stats: dict[str, Any],
+    runtime: dict[str, Any],
+    pending_runs_count: int,
+    jobs: list[Any],
+) -> dict[str, Any]:
+    runtime_trust = runtime.get("runtime_trust") or {}
+    warnings = list(runtime_trust.get("warnings") or [])
+    git = runtime.get("git") or {}
+    control = runtime.get("boss_control") or {}
+    control_health = _boss_control_health(control)
+    lock_consistent = bool(runtime_trust.get("lock_exists")) and not warnings and runtime_trust.get("lock_pid") == runtime.get("process_id")
+
+    return {
+        "provider_mode": provider_mode,
+        "git_available": bool(git.get("available")),
+        "git_summary": git.get("summary") or "Git status unavailable.",
+        "repo_clean": git.get("clean"),
+        "pending_memory_count": int(stats.get("pending_memory_candidates", 0) or 0),
+        "pending_jobs_count": len(jobs),
+        "pending_runs_count": pending_runs_count,
+        "lock_consistent": lock_consistent,
+        "status_warnings": warnings,
+        "boss_control_configured": bool(control.get("configured")),
+        "boss_control_healthy": bool(control_health.get("healthy")),
+        "rules_count": int(control_health.get("rules_count", 0) or 0),
+    }
+
 @app.post("/api/system/scan")
 async def trigger_scan():
     result = full_scan()
@@ -937,10 +1722,20 @@ async def system_status():
     store = get_knowledge_store()
     stats = store.stats()
     pending_runs_count, pending_approvals_count, stale_runs_count = pending_run_metrics()
+    jobs = list_background_jobs(limit=500)
     runtime = runtime_status_payload()
+    provider_mode = resolve_provider_mode()
+    control_health = _boss_control_health(runtime["boss_control"])
+    diagnostics = _diagnostics_summary(
+        provider_mode=provider_mode,
+        stats=stats,
+        runtime=runtime,
+        pending_runs_count=pending_runs_count,
+        jobs=jobs,
+    )
     return {
         "provider": "openai",
-        "provider_mode": resolve_provider_mode(),
+        "provider_mode": provider_mode,
         "provider_session_mode": resolve_provider_session_mode(),
         "responses_supported": supports_responses_mode(),
         "app_version": runtime["app_version"],
@@ -964,16 +1759,23 @@ async def system_status():
         "interpreter_path": runtime["interpreter_path"],
         "workspace_path": runtime["workspace_path"],
         "current_working_directory": runtime["current_working_directory"],
+        "git": runtime["git"],
         "runtime_trust": runtime["runtime_trust"],
+        "boss_control": runtime["boss_control"],
+        "boss_control_health": control_health,
+        "diagnostics": diagnostics,
         "api_lock_file": str(settings.api_lock_file),
         "log_path": str(settings.event_log_file),
-        "pending_run_count": pending_runs_count,
         "pending_approvals_count": pending_approvals_count,
         "pending_runs_count": pending_runs_count,
-        "stale_pending_run_count": stale_runs_count,
-        "stale_run_count": stale_runs_count,
+        "stale_pending_runs_count": stale_runs_count,
+        "background_jobs_count": len(jobs),
+        "active_background_jobs_count": sum(1 for job in jobs if job.status == BackgroundJobStatus.RUNNING.value),
+        "waiting_background_jobs_count": sum(1 for job in jobs if job.status == BackgroundJobStatus.WAITING_PERMISSION.value),
         "knowledge_db_path": str(settings.knowledge_db_file),
         "pending_runs_path": str(settings.pending_runs_dir),
+        "background_jobs_path": str(settings.jobs_dir),
+        "background_job_logs_path": str(settings.job_logs_dir),
     }
 
 
@@ -982,11 +1784,13 @@ async def system_status():
 @app.on_event("startup")
 async def startup():
     expired_runs = cleanup_stale_pending_runs()
+    recovered_jobs = recover_interrupted_background_jobs()
     mark_api_server_ready()
     logger.info(
-        "Boss API started (provider_mode=%s, expired_pending_runs=%s)",
+        "Boss API started (provider_mode=%s, expired_pending_runs=%s, recovered_background_jobs=%s)",
         resolve_provider_mode(),
         expired_runs,
+        recovered_jobs,
     )
 
 

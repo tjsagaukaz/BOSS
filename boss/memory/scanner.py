@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from boss.config import settings
+from boss.control import load_boss_control, should_index_path
 from boss.memory.knowledge import KnowledgeStore, Project, get_knowledge_store
 
 
@@ -152,7 +153,9 @@ def _is_project_root(path: Path) -> bool:
     return (path / ".git").exists() or any((path / marker).exists() for marker in _PROJECT_MARKERS)
 
 
-def _should_skip_dir(name: str) -> bool:
+def _should_skip_dir(name: str, *, allow_boss_control_dir: bool = False) -> bool:
+    if allow_boss_control_dir and name == ".boss":
+        return False
     if name in _SKIP_DIRS:
         return True
     if any(name.endswith(suffix) for suffix in _SKIP_DIR_SUFFIXES):
@@ -261,16 +264,21 @@ def _walk_project_files(project_path: Path) -> tuple[list[Path], int, bool]:
     candidates: list[Path] = []
     seen = 0
     truncated = False
+    control = load_boss_control(project_path)
+    include_boss_control_files = bool(control.config.indexing.get("include_boss_control_files", False))
 
     for root, dirnames, filenames in os.walk(project_path, topdown=True, followlinks=False):
         dirnames[:] = [
             name
             for name in sorted(dirnames, key=str.lower)
-            if not _should_skip_dir(name)
+            if not _should_skip_dir(name, allow_boss_control_dir=include_boss_control_files)
+            and should_index_path(project_path, Path(root) / name, is_dir=True)
         ]
 
         for filename in sorted(filenames, key=str.lower):
             path = Path(root) / filename
+            if not should_index_path(project_path, path, is_dir=False):
+                continue
             if path.is_symlink() or not path.is_file() or _should_skip_file(path):
                 continue
             candidates.append(path)
@@ -555,6 +563,7 @@ def _build_project_metadata(
     relative_paths = _relative_paths(project_path, indexed_files)
     entry_points = _likely_entry_points(relative_paths, project_type)
     metadata = _package_metadata(project_path)
+    control = load_boss_control(project_path)
     metadata.update(
         {
             "file_types": _file_type_summary(relative_paths),
@@ -567,6 +576,14 @@ def _build_project_metadata(
             "scan_truncated": truncated,
         }
     )
+    if control.is_configured():
+        metadata["boss_control"] = {
+            "default_mode": control.config.default_mode,
+            "review_mode_name": control.config.review_mode_name(),
+            "rules": [rule.name for rule in control.rules],
+            "bossignore": control.access_ignore_path.exists(),
+            "bossindexignore": control.index_ignore_path.exists(),
+        }
     if git_remote:
         metadata["git_remote"] = git_remote
     if git_branch:
@@ -593,6 +610,7 @@ def _project_summary_signature(
         "useful_commands": metadata.get("useful_commands"),
         "file_map": metadata.get("file_map"),
         "notable_modules": metadata.get("notable_modules"),
+        "boss_control": metadata.get("boss_control"),
         "indexed_files_count": metadata.get("indexed_files_count"),
         "scan_truncated": metadata.get("scan_truncated"),
     }
