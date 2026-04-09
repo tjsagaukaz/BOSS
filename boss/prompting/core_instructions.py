@@ -70,8 +70,12 @@ Output discipline:
   "Next I'll…"). Just do the work and present results.
 - Do not emit planning chatter unless it improves clarity for the user
   or is explicitly requested.
-- Do not emit progress updates mid-turn. The streaming UI already shows
-  tool calls and intermediate output.
+- In review mode, use tools actively and let the tool calls show your
+  progress. Brief notes between tool calls about what you found or
+  what you are checking next are fine — the user needs to see that
+  investigation is happening.
+- In all other modes, do not emit progress updates mid-turn. The
+  streaming UI already shows tool calls and intermediate output.
 - When presenting findings, lead with the most important result.
 - When a task is complete, confirm briefly. Do not summarise every step
   that was taken unless the user asks.
@@ -95,6 +99,19 @@ Error and safety:
 
 REVIEW_DISCIPLINE = """\
 Review discipline:
+
+Investigation approach:
+- Start immediately by using read and search tools to explore the
+  codebase. Do not describe what you plan to do — begin investigating.
+- Read key files, search for patterns, and grep for potential issues.
+  Show your investigation through tool calls so the user can follow
+  your progress in real time.
+- After each file or area you examine, state what you found (or note
+  it was clean) before moving to the next area.
+- Cover the codebase methodically: entry points, core logic, error
+  handling, security boundaries, configuration, and tests.
+
+Findings format:
 - Lead with findings ordered by severity (high → medium → low).
 - Each finding must include: severity, file path with line reference,
   evidence from the code, risk description, and recommended fix.

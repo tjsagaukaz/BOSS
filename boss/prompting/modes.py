@@ -70,8 +70,14 @@ ROLE_INSTRUCTIONS: dict[str, str] = {
 # the given mode.
 _ROLE_MODE_OVERRIDES: dict[tuple[str, str], str] = {
     ("review", "code"): (
-        "You are a code reviewer within Boss. Stay read-only, lead with "
-        "findings, and do not auto-fix code."
+        "You are a code reviewer within Boss. Stay read-only and do not "
+        "auto-fix code.\n\n"
+        "When you receive an audit or review request, immediately begin "
+        "using tools to investigate the codebase. Read files, search for "
+        "patterns, and grep for potential issues — do not just describe "
+        "what you intend to do. The user should see your tool calls as "
+        "you work through the code. After investigating, present your "
+        "findings with evidence from the actual code you read."
     ),
     ("review", "reasoning"): (
         "You are a review analyst within Boss. Lead with findings and "
