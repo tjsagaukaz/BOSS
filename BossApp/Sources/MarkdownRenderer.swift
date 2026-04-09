@@ -1,4 +1,5 @@
 import SwiftUI
+import HighlightSwift
 
 // MARK: - AST Model
 
@@ -340,114 +341,10 @@ enum MDTypo {
     static let tracking: CGFloat = -0.15
 }
 
-// MARK: - Syntax Highlighting
+// MARK: - Syntax Highlighting (HighlightSwift)
 
 enum SyntaxHighlighter {
-    enum TokenKind { case keyword, string, comment, number, plain }
-
-    private static let keywordSets: [String: Set<String>] = [
-        "swift": ["func", "let", "var", "class", "struct", "enum", "protocol", "import", "return",
-                  "if", "else", "for", "while", "guard", "switch", "case", "break", "continue",
-                  "self", "true", "false", "nil", "private", "public", "static", "override",
-                  "init", "throws", "throw", "try", "catch", "await", "async", "some", "any",
-                  "where", "in", "extension", "typealias", "defer", "do", "repeat"],
-        "python": ["def", "class", "import", "from", "return", "if", "elif", "else", "for",
-                   "while", "with", "as", "try", "except", "finally", "raise", "pass", "break",
-                   "continue", "and", "or", "not", "in", "is", "None", "True", "False",
-                   "lambda", "yield", "global", "nonlocal", "async", "await", "self"],
-        "javascript": ["function", "const", "let", "var", "class", "import", "export", "default",
-                       "return", "if", "else", "for", "while", "do", "switch", "case", "break",
-                       "continue", "new", "this", "typeof", "instanceof", "throw", "try", "catch",
-                       "finally", "async", "await", "true", "false", "null", "undefined"],
-        "typescript": ["function", "const", "let", "var", "class", "interface", "type", "import",
-                       "export", "default", "return", "if", "else", "for", "while", "do", "switch",
-                       "case", "break", "continue", "new", "this", "typeof", "instanceof", "throw",
-                       "try", "catch", "finally", "async", "await", "true", "false", "null",
-                       "undefined", "enum", "implements", "abstract", "as", "keyof", "readonly"],
-        "rust": ["fn", "let", "mut", "const", "static", "struct", "enum", "impl", "trait", "type",
-                "use", "mod", "pub", "crate", "self", "super", "return", "if", "else", "for",
-                "while", "loop", "match", "break", "continue", "where", "as", "in", "ref",
-                "move", "async", "await", "unsafe", "true", "false"],
-        "go": ["func", "var", "const", "type", "struct", "interface", "import", "package", "return",
-              "if", "else", "for", "range", "switch", "case", "break", "continue", "select",
-              "chan", "go", "defer", "map", "make", "new", "true", "false", "nil", "default"],
-        "bash": ["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac",
-                "function", "return", "in", "echo", "exit", "export", "source", "local", "set",
-                "unset", "true", "false"],
-    ]
-
-    private static let hashCommentLangs: Set<String> = ["python", "bash", "ruby", "r"]
-    private static let slashCommentLangs: Set<String> = ["swift", "javascript", "typescript", "rust", "go", "java", "c", "cpp"]
-
-    static func highlightedText(_ code: String, language: String?) -> Text {
-        let tokens = tokenize(code, language: language)
-        return tokens.reduce(Text("")) { result, token in
-            result + styledText(token)
-        }
-    }
-
-    private static func styledText(_ token: (kind: TokenKind, text: String)) -> Text {
-        let color: Color
-        switch token.kind {
-        case .keyword:  color = Color(red: 0.78, green: 0.46, blue: 0.93)
-        case .string:   color = Color(red: 0.58, green: 0.84, blue: 0.44)
-        case .comment:  color = Color.white.opacity(0.35)
-        case .number:   color = Color(red: 0.85, green: 0.7, blue: 0.35)
-        case .plain:    color = Color.white.opacity(0.82)
-        }
-        return Text(token.text).foregroundColor(color)
-    }
-
-    private static func tokenize(_ code: String, language: String?) -> [(kind: TokenKind, text: String)] {
-        let lang = language?.lowercased() ?? ""
-        guard let keywords = keywordSets[lang] else {
-            return [(.plain, code)]
-        }
-
-        var patterns: [String] = []
-        if slashCommentLangs.contains(lang) { patterns.append("//[^\n]*") }
-        if hashCommentLangs.contains(lang) { patterns.append("#[^\n]*") }
-        patterns.append("\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'")
-        patterns.append("\\b\\d+(?:\\.\\d+)?\\b")
-        patterns.append("\\b[A-Za-z_][A-Za-z0-9_]*\\b")
-
-        guard let regex = try? NSRegularExpression(pattern: patterns.joined(separator: "|")) else {
-            return [(.plain, code)]
-        }
-
-        let ns = code as NSString
-        let matches = regex.matches(in: code, range: NSRange(location: 0, length: ns.length))
-        var tokens: [(kind: TokenKind, text: String)] = []
-        var cursor = 0
-
-        for match in matches {
-            let r = match.range
-            if r.location > cursor {
-                tokens.append((.plain, ns.substring(with: NSRange(location: cursor, length: r.location - cursor))))
-            }
-            let t = ns.substring(with: r)
-            let kind: TokenKind
-            if t.hasPrefix("//") || t.hasPrefix("#") {
-                kind = .comment
-            } else if t.hasPrefix("\"") || t.hasPrefix("\'") {
-                kind = .string
-            } else if t.first?.isNumber == true {
-                kind = .number
-            } else if keywords.contains(t) {
-                kind = .keyword
-            } else {
-                kind = .plain
-            }
-            tokens.append((kind: kind, text: t))
-            cursor = r.location + r.length
-        }
-
-        if cursor < ns.length {
-            tokens.append((.plain, ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))))
-        }
-
-        return tokens
-    }
+    static let highlighter = Highlight()
 }
 
 // MARK: - Inline Text Rendering
@@ -520,6 +417,76 @@ struct MarkdownBlocksView: View {
             ForEach(nodes) { node in
                 MarkdownNodeView(node: node)
             }
+        }
+    }
+}
+
+private struct CodeBlockContainer: View {
+    let language: String?
+    let code: String
+
+    @State private var highlightedText: Text?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Circle().fill(Color.red.opacity(0.8)).frame(width: 8, height: 8)
+                Circle().fill(Color.yellow.opacity(0.8)).frame(width: 8, height: 8)
+                Circle().fill(Color.green.opacity(0.8)).frame(width: 8, height: 8)
+                Spacer()
+
+                if let language, !language.isEmpty {
+                    Text(language.uppercased())
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(MDTypo.tertiaryText)
+                        .tracking(0.4)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+            .background(Color.white.opacity(0.025))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                (highlightedText ?? fallbackText)
+                    .font(.system(size: 13, design: .monospaced))
+                    .lineSpacing(4)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.white.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+        )
+        .task(id: code) {
+            await highlight()
+        }
+    }
+
+    private var fallbackText: Text {
+        Text(code)
+            .foregroundColor(Color.white.opacity(0.82))
+    }
+
+    private func highlight() async {
+        do {
+            let mode: HighlightMode
+            if let language, !language.isEmpty {
+                mode = .languageAlias(language)
+            } else {
+                mode = .automatic
+            }
+            let result = try await SyntaxHighlighter.highlighter.request(code, mode: mode, colors: .dark(.atomOne))
+            highlightedText = Text(result.attributedText)
+        } catch {
+            highlightedText = nil
         }
     }
 }
@@ -599,43 +566,7 @@ private struct MarkdownNodeView: View {
     }
 
     private func codeBlockView(language: String?, code: String) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Circle().fill(Color.red.opacity(0.8)).frame(width: 8, height: 8)
-                Circle().fill(Color.yellow.opacity(0.8)).frame(width: 8, height: 8)
-                Circle().fill(Color.green.opacity(0.8)).frame(width: 8, height: 8)
-                Spacer()
-
-                if let language, !language.isEmpty {
-                    Text(language.uppercased())
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(MDTypo.tertiaryText)
-                        .tracking(0.4)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-            .background(Color.white.opacity(0.025))
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                SyntaxHighlighter.highlightedText(code, language: language)
-                    .font(.system(size: 13, design: .monospaced))
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.035))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
-        )
+        CodeBlockContainer(language: language, code: code)
     }
 
     private func listView(ordered: Bool, items: [[MarkdownNode]]) -> some View {
