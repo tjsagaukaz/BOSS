@@ -335,7 +335,7 @@ class TestWorkerPlanIntegration(unittest.TestCase):
                         events.append(event)
                 return events
 
-            events = asyncio.get_event_loop().run_until_complete(_run())
+            events = asyncio.run(_run())
 
             # Must have plan started, worker started, worker completed, plan completed events.
             event_types = [(e["type"], e.get("event")) for e in events]

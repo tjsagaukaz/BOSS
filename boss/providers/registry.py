@@ -173,6 +173,8 @@ def check_provider_health(info: ProviderInfo) -> ProviderHealth:
     try:
         if info.kind == "openai":
             return _check_openai_health(info, start)
+        elif info.kind == "anthropic":
+            return _check_anthropic_health(info, start)
         elif info.kind in ("ollama", "openai_compatible"):
             return _check_compatible_health(info, start)
         else:
@@ -189,6 +191,24 @@ def _check_openai_health(info: ProviderInfo, start: float) -> ProviderHealth:
     import os
 
     key_var = info.api_key_env or "OPENAI_API_KEY"
+    if not os.getenv(key_var):
+        return ProviderHealth(
+            status=ProviderStatus.UNAVAILABLE,
+            error=f"API key env var {key_var} not set",
+            checked_at=time.time(),
+        )
+    elapsed = (time.time() - start) * 1000
+    return ProviderHealth(
+        status=ProviderStatus.HEALTHY,
+        latency_ms=elapsed,
+        checked_at=time.time(),
+    )
+
+
+def _check_anthropic_health(info: ProviderInfo, start: float) -> ProviderHealth:
+    import os
+
+    key_var = info.api_key_env or "ANTHROPIC_API_KEY"
     if not os.getenv(key_var):
         return ProviderHealth(
             status=ProviderStatus.UNAVAILABLE,
@@ -262,6 +282,17 @@ def _build_registry() -> ProviderRegistry:
     if openai_cfg.get("enabled", True):
         openai_info = build_openai_provider_info(openai_cfg)
         registry.register(openai_info)
+
+    # Register Anthropic if configured
+    anthropic_cfg = providers_cfg.get("anthropic", {})
+    if anthropic_cfg.get("enabled", False):
+        try:
+            from boss.providers.anthropic_provider import build_anthropic_provider_info
+
+            anthropic_info = build_anthropic_provider_info(anthropic_cfg)
+            registry.register(anthropic_info)
+        except ImportError:
+            logger.warning("Anthropic provider enabled but boss.providers.anthropic_provider not found")
 
     # Register Ollama / OpenAI-compatible if configured
     ollama_cfg = providers_cfg.get("ollama", {})

@@ -1,47 +1,81 @@
 Boss Assistant Build Plan
 
 Goal
-Build a personal AI assistant on macOS that uses OpenAI cloud models through the OpenAI Agents Python SDK.
+Build a personal AI assistant on macOS with a multi-provider model layer. The
+system uses configurable model routing so any capable provider (OpenAI, Anthropic,
+Ollama, or OpenAI-compatible endpoints) can serve a given role. Model names are
+always configurable — no single provider is hardcoded as the permanent default.
 
 Architecture
 User Input
-  -> General Agent (cloud gpt-5.4-mini)
-    -> Mac Agent (cloud gpt-5.4-mini + tools + MCP)
-    -> Research Agent (cloud gpt-5.4 + web search)
-    -> Reasoning Agent (cloud gpt-5.4)
-    -> Code Agent (cloud gpt-5.4)
+  -> General Agent (configurable, default cloud)
+    -> Mac Agent (configurable + tools + MCP)
+    -> Research Agent (configurable + web search)
+    -> Reasoning Agent (configurable)
+    -> Code Agent (configurable)
   -> Output + Memory Persistence
 
-Phases
-Phase 0
-- Install Homebrew if needed
-- Install Python 3.12+
-- Install Node.js
-- Create virtual environment
-- Install Python packages
+Provider routing is handled by `boss/providers/registry.py`. Each provider
+registers capabilities (chat, streaming, vision, embeddings, tool_use) and the
+registry resolves which provider handles each mode (chat, reasoning, embeddings,
+vision) with a configurable fallback chain.
 
-Phase 1
-- Implement config-driven cloud model provider
-- Define agents and handoffs
-- Add a basic CLI runner
+Completed Phases
+Phase 0 — Environment setup (Homebrew, Python 3.12+, Node.js, venv, packages)
+Phase 1 — Config-driven cloud model provider, agents, handoffs, CLI runner
+Phase 2 — Native macOS function tools registered with the Mac agent
+Phase 3 — MCP server definitions, Apple integration, hosted web search
+Phase 4 — Input guardrails for dangerous requests
+Phase 5 — Conversation persistence across restarts
+Phase 6 — Streaming CLI with rich output
+Phase 7 — Tool governance, permissions, memory subsystem, background jobs
+Phase 8 — Code review, multi-agent workers, deploy/preview, loop engine
+Phase 9 — Multi-provider registry (OpenAI + Ollama), codebase intelligence
 
-Phase 2
-- Add native macOS function tools
-- Register tools with the Mac agent
+Current Phase — Phase 10: Provider Expansion and Hardening
 
-Phase 3
-- Add MCP server definitions
-- Attach MCP servers to agents
-- Add hosted web search to research agent
+Backlog (priority order)
 
-Phase 4
-- Add input guardrails for dangerous requests
+1. Anthropic provider integration
+   - Add boss/providers/anthropic_provider.py
+   - Build ProviderInfo with capabilities: chat, streaming, tool_use, vision
+   - Use the Anthropic Python SDK (anthropic package) with AsyncAnthropic client
+   - Streaming support via Anthropic's streaming messages API
+   - Tool use via Anthropic's native tool_use format
+   - Vision support flagged if the configured model supports it
+   - Health check: verify ANTHROPIC_API_KEY env var is set
+   - Register in _build_registry() alongside openai/ollama
+   - Add [providers.anthropic] section to .boss/config.toml
+   - Add routing config so any mode can target "anthropic"
+   - Ensure capability-aware fallback works across all three providers
+   - Tests: provider registration, capability routing, health checks
 
-Phase 5
-- Add conversation persistence across restarts
+2. Knowledge store FTS5 migration
+   - Add FTS5 virtual table synced from existing fact/memory tables
+   - Replace LIKE %pattern% queries with FTS5 MATCH queries
+   - Keep backward-compatible read path for pre-FTS databases
 
-Phase 6
-- Polish the CLI with streaming and rich output
+3. Split api.py into route modules
+   - Extract routes/chat.py, routes/memory.py, routes/jobs.py,
+     routes/permissions.py, routes/deploy.py, routes/preview.py
+   - Keep api.py as the app factory that mounts sub-routers
+
+4. CORS policy restriction
+   - Replace allow_origins=["*"] with localhost + tauri origins
+   - Make origins configurable in .boss/config.toml
+
+5. MCP server version pinning
+   - Pin apple-mcp and @modelcontextprotocol packages to specific versions
+   - Remove @latest tags
+
+6. Tool parameter extraction error handling
+   - Replace silent return {} with ValueError on parse failure
+   - Callers handle the error explicitly
+
+7. Ollama as optional local provider (available, not default)
+   - Ollama remains disabled by default in config
+   - Can be enabled by the user when Ollama is installed
+   - No automatic fallback to Ollama unless explicitly configured
 
 Project Structure
 /Users/tj/boss/
@@ -53,9 +87,18 @@ Project Structure
     main.py
     models.py
     agents.py
+    providers/
+      __init__.py
+      base.py
+      registry.py
+      openai_provider.py
+      ollama_provider.py
+      anthropic_provider.py  (next)
     tools/
       __init__.py
       mac.py
+      memory.py
+      research.py
     mcp/
       __init__.py
       servers.py
@@ -65,18 +108,58 @@ Project Structure
     persistence/
       __init__.py
       history.py
-
-Build Order
-1. Get Phase 1 working end to end with cloud routing.
-2. Add Mac tools and test them individually.
-3. Add MCP servers and test Apple integration.
-4. Add safety guardrails.
-5. Add persistence.
-6. Improve CLI experience with streaming.
+    memory/
+      __init__.py
+      knowledge.py
+      scanner.py
+      distillation.py
+      injection.py
+    intelligence/
+      __init__.py
+      index.py
+      parsers.py
+      retrieval.py
+      embeddings.py
+    loop/
+      __init__.py
+      engine.py
+      policy.py
+      state.py
+    workers/
+      __init__.py
+      engine.py
+      coordinator.py
+      isolation.py
+      roles.py
+      conflicts.py
+      state.py
+    deploy/
+      __init__.py
+      adapters.py
+      engine.py
+      static_adapter.py
+      state.py
+    preview/
+      __init__.py
+      server.py
+      session.py
+      vision.py
+    runner/
+      __init__.py
+      engine.py
+      policy.py
+      sandbox.py
+      workspace.py
+    context/
+      __init__.py
+      manager.py
 
 Verification Targets
 - Basic Q and A routes through the general entry agent.
-- Complex reasoning routes to the cloud reasoning agent.
+- Complex reasoning routes to the configured reasoning provider.
 - Mac requests call macOS tools.
 - Dangerous requests are blocked.
 - Session history persists across restarts.
+- Provider registry resolves correct provider per mode.
+- Anthropic provider passes health check when API key is set.
+- Capability fallback works when a provider is unavailable.

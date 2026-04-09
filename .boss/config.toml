@@ -55,11 +55,25 @@ auto_mode_keywords = [
 ]
 
 # ── Provider configuration ──────────────────────────────────────────
+#
+# Providers are registered at startup and resolved by capability.
+# Any mode (chat, reasoning, embeddings, vision) can target any enabled
+# provider. Model names are always configurable via environment variables
+# (BOSS_GENERAL_MODEL, BOSS_CODE_MODEL, etc.) — routing determines which
+# provider serves the request, not which model name is used.
+#
+# Priority for next provider integration: Anthropic, then Ollama tuning.
 
 [providers.openai]
 enabled = true
 api_key_env = "OPENAI_API_KEY"
 # capabilities = ["chat", "streaming", "vision", "embeddings", "tool_use"]
+
+[providers.anthropic]
+enabled = false
+api_key_env = "ANTHROPIC_API_KEY"
+# capabilities = ["chat", "streaming", "vision", "tool_use"]
+# default_model = "claude-sonnet-4-20250514"
 
 [providers.ollama]
 enabled = false
@@ -72,4 +86,4 @@ chat = "openai"
 reasoning = "openai"
 embeddings = "openai"
 vision = "openai"
-fallback = "ollama"
+# fallback = "anthropic"

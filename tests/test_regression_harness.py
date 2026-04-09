@@ -3187,5 +3187,207 @@ class TestBackgroundJobRecordLoopFields(unittest.TestCase):
                 self.assertIsNone(loaded.loop_id)
 
 
+# ---------------------------------------------------------------------------
+# CORS configuration
+# ---------------------------------------------------------------------------
+
+
+class TestCORSConfiguration(unittest.TestCase):
+    """Verify CORS is no longer wildcarded and is configurable."""
+
+    def test_default_cors_origins_are_local(self):
+        origins = settings.cors_allowed_origins
+        self.assertIsInstance(origins, tuple)
+        self.assertGreater(len(origins), 0)
+        for origin in origins:
+            self.assertTrue(
+                origin.startswith("http://localhost")
+                or origin.startswith("http://127.0.0.1")
+                or origin.startswith("tauri://"),
+                f"Unexpected default origin: {origin}",
+            )
+
+    def test_wildcard_not_in_defaults(self):
+        self.assertNotIn("*", settings.cors_allowed_origins)
+
+    def test_cors_origins_override_via_env(self):
+        with override_settings(
+            cors_allowed_origins=("http://custom:9000", "http://other:3000"),
+        ):
+            self.assertEqual(
+                settings.cors_allowed_origins,
+                ("http://custom:9000", "http://other:3000"),
+            )
+
+    def test_cors_in_system_status(self):
+        """The system status endpoint should surface resolved CORS origins."""
+        try:
+            from boss.api import system_status
+        except RuntimeError:
+            self.skipTest("API server lock held; cannot import boss.api in-process")
+
+        result = asyncio.run(system_status())
+        self.assertIn("cors_allowed_origins", result)
+        self.assertIsInstance(result["cors_allowed_origins"], list)
+        self.assertNotIn("*", result["cors_allowed_origins"])
+
+
+# ---------------------------------------------------------------------------
+# MCP server version pinning
+# ---------------------------------------------------------------------------
+
+
+class TestMCPServerPinning(unittest.TestCase):
+    """Verify MCP server commands use pinned versions, not @latest."""
+
+    def test_apple_mcp_pinned(self):
+        from boss.mcp.servers import create_apple_mcp, _APPLE_MCP_VERSION
+
+        server = create_apple_mcp()
+        args = server.params.args
+        pkg_arg = args[1]
+        self.assertNotIn("@latest", pkg_arg)
+        self.assertIn(f"@{_APPLE_MCP_VERSION}", pkg_arg)
+
+    def test_filesystem_mcp_pinned(self):
+        from boss.mcp.servers import create_filesystem_mcp, _MCP_FILESYSTEM_VERSION
+
+        server = create_filesystem_mcp()
+        args = server.params.args
+        pkg_arg = args[1]
+        self.assertNotIn("@latest", pkg_arg)
+        self.assertIn(f"@{_MCP_FILESYSTEM_VERSION}", pkg_arg)
+
+    def test_memory_mcp_pinned(self):
+        from boss.mcp.servers import create_memory_mcp, _MCP_MEMORY_VERSION
+
+        server = create_memory_mcp()
+        args = server.params.args
+        pkg_arg = args[1]
+        self.assertNotIn("@latest", pkg_arg)
+        self.assertIn(f"@{_MCP_MEMORY_VERSION}", pkg_arg)
+
+    def test_no_latest_in_any_server(self):
+        from boss.mcp.servers import create_mcp_servers
+
+        servers = create_mcp_servers()
+        for name, server in servers.items():
+            for arg in server.params.args:
+                self.assertNotIn(
+                    "@latest", arg,
+                    f"MCP server '{name}' still uses @latest: {arg}",
+                )
+
+
+# ---------------------------------------------------------------------------
+# Tool parameter extraction
+# ---------------------------------------------------------------------------
+
+
+class TestExtractToolParameters(unittest.TestCase):
+    """Verify extract_tool_parameters raises on unparseable input."""
+
+    def _import(self):
+        from boss.execution import (
+            extract_tool_parameters,
+            ToolParameterExtractionError,
+        )
+        return extract_tool_parameters, ToolParameterExtractionError
+
+    def test_dict_arguments(self):
+        extract, _ = self._import()
+        result = extract({"arguments": {"path": "/tmp", "recursive": True}})
+        self.assertEqual(result, {"path": "/tmp", "recursive": True})
+
+    def test_json_string_arguments(self):
+        extract, _ = self._import()
+        result = extract({"arguments": '{"name": "test"}'})
+        self.assertEqual(result, {"name": "test"})
+
+    def test_plain_string_arguments(self):
+        extract, _ = self._import()
+        result = extract({"arguments": "some plain text"})
+        self.assertEqual(result, {"value": "some plain text"})
+
+    def test_query_field(self):
+        extract, _ = self._import()
+        result = extract({"query": "search term"})
+        self.assertEqual(result, {"query": "search term"})
+
+    def test_empty_dict_raises(self):
+        extract, Error = self._import()
+        with self.assertRaises(Error):
+            extract({})
+
+    def test_dict_with_irrelevant_keys_raises(self):
+        extract, Error = self._import()
+        with self.assertRaises(Error):
+            extract({"foo": "bar", "baz": 42})
+
+    def test_none_raises(self):
+        extract, Error = self._import()
+        with self.assertRaises(Error):
+            extract(None)
+
+    def test_plain_object_no_attrs_raises(self):
+        extract, Error = self._import()
+        with self.assertRaises(Error):
+            extract(object())
+
+    def test_error_is_value_error_subclass(self):
+        _, Error = self._import()
+        self.assertTrue(issubclass(Error, ValueError))
+
+    def test_object_with_dict_arguments(self):
+        extract, _ = self._import()
+
+        class FakeItem:
+            arguments = {"key": "value"}
+
+        result = extract(FakeItem())
+        self.assertEqual(result, {"key": "value"})
+
+    def test_object_with_query(self):
+        extract, _ = self._import()
+
+        class FakeItem:
+            query = "hello"
+
+        result = extract(FakeItem())
+        self.assertEqual(result, {"query": "hello"})
+
+    def test_object_without_args_or_query_raises(self):
+        extract, Error = self._import()
+
+        class FakeItem:
+            name = "irrelevant"
+
+        with self.assertRaises(Error):
+            extract(FakeItem())
+
+
+class TestBuildToolDisplayHandlesExtractionFailure(unittest.TestCase):
+    """Verify build_tool_display degrades gracefully on extraction failure."""
+
+    def test_unknown_tool_with_bad_item_does_not_crash(self):
+        from boss.execution import build_tool_display
+
+        title, desc, exec_type, scope_key, scope_label = build_tool_display(
+            "some_unknown_tool", object()
+        )
+        self.assertIsInstance(title, str)
+        self.assertIsInstance(desc, str)
+        self.assertEqual(scope_key, "any")
+
+    def test_transfer_tool_with_bad_item_does_not_crash(self):
+        from boss.execution import build_tool_display
+
+        title, desc, exec_type, scope_key, scope_label = build_tool_display(
+            "transfer_to_mac_agent", object()
+        )
+        self.assertEqual(title, "Route")
+        self.assertIn("Mac Agent", desc)
+
+
 if __name__ == "__main__":
     unittest.main()

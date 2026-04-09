@@ -8,6 +8,8 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -117,12 +119,28 @@ logger = logging.getLogger("boss.api")
 
 ensure_api_server_lock()
 
-app = FastAPI(title="Boss Assistant API", version=__version__)
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    expired_runs = cleanup_stale_pending_runs()
+    recovered_jobs = recover_interrupted_background_jobs()
+    mark_api_server_ready()
+    logger.info(
+        "Boss API started (provider_mode=%s, expired_pending_runs=%s, recovered_background_jobs=%s)",
+        resolve_provider_mode(),
+        expired_runs,
+        recovered_jobs,
+    )
+    yield
+    release_api_server_lock()
+
+
+app = FastAPI(title="Boss Assistant API", version=__version__, lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=list(settings.cors_allowed_origins),
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Boss-Session"],
 )
 
 session_context_manager = SessionContextManager()
@@ -2351,6 +2369,7 @@ async def system_status():
         "background_jobs_path": str(settings.jobs_dir),
         "background_job_logs_path": str(settings.job_logs_dir),
         "runner": runtime.get("runner"),
+        "cors_allowed_origins": list(settings.cors_allowed_origins),
     }
 
 
@@ -2829,23 +2848,3 @@ async def cancel_deployment_endpoint(deployment_id: str):
         return deploy.to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-
-# --- Warm-up on startup ---
-
-@app.on_event("startup")
-async def startup():
-    expired_runs = cleanup_stale_pending_runs()
-    recovered_jobs = recover_interrupted_background_jobs()
-    mark_api_server_ready()
-    logger.info(
-        "Boss API started (provider_mode=%s, expired_pending_runs=%s, recovered_background_jobs=%s)",
-        resolve_provider_mode(),
-        expired_runs,
-        recovered_jobs,
-    )
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    release_api_server_lock()

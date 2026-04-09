@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
@@ -9,6 +10,8 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 from agents import function_tool
 from agents.items import ToolApprovalItem
@@ -417,7 +420,16 @@ def append_permission_log(
     )
 
 
+class ToolParameterExtractionError(ValueError):
+    """Raised when tool parameters cannot be extracted from a raw item."""
+
+
 def extract_tool_parameters(raw_item: Any) -> dict[str, Any]:
+    """Extract tool parameters from a raw tool-call item.
+
+    Raises ``ToolParameterExtractionError`` when no meaningful parameters
+    can be found, instead of silently returning an empty dict.
+    """
     if isinstance(raw_item, dict):
         arguments = raw_item.get("arguments")
         if isinstance(arguments, dict):
@@ -431,7 +443,9 @@ def extract_tool_parameters(raw_item: Any) -> dict[str, Any]:
         query = raw_item.get("query")
         if isinstance(query, str):
             return {"query": query}
-        return {}
+        raise ToolParameterExtractionError(
+            f"Cannot extract parameters from dict item (keys: {sorted(raw_item.keys())})"
+        )
 
     arguments = getattr(raw_item, "arguments", None)
     if isinstance(arguments, dict):
@@ -447,7 +461,9 @@ def extract_tool_parameters(raw_item: Any) -> dict[str, Any]:
     if isinstance(query, str):
         return {"query": query}
 
-    return {}
+    raise ToolParameterExtractionError(
+        f"Cannot extract parameters from {type(raw_item).__name__}"
+    )
 
 
 def get_tool_call_id(raw_item: Any) -> str:
@@ -462,7 +478,11 @@ def build_tool_display(
     tool_name: str, raw_item: Any
 ) -> tuple[str, str, ExecutionType | None, str, str]:
     metadata = get_tool_metadata(tool_name)
-    params = extract_tool_parameters(raw_item)
+    try:
+        params = extract_tool_parameters(raw_item)
+    except ToolParameterExtractionError as exc:
+        logger.warning("Parameter extraction failed for tool %s: %s", tool_name, exc)
+        params = {}
     if metadata is None:
         if tool_name.startswith("transfer_to_"):
             target = tool_name.removeprefix("transfer_to_").replace("_", " ").strip().title()

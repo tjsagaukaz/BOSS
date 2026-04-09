@@ -47,7 +47,7 @@ This repository is a local-first personal agent split between a Python backend a
 
 ## Coding Conventions
 
-- Keep changes local-only. Do not add remote observability, hosted state, or cloud persistence outside the existing OpenAI API usage.
+- Keep changes local-only. Do not add remote observability, hosted state, or cloud persistence outside the configured LLM provider APIs (OpenAI, Anthropic, or other enabled providers).
 - Preserve API contracts and existing SwiftUI view-model structure unless the task explicitly requires a contract change.
 - Prefer additive refactors to rewrites. When changing a persisted format, keep reads backward compatible.
 - Inspect the actual installed SDK or package surface before changing provider, model, tracing, or tool-integration behavior.
