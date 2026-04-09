@@ -10,6 +10,7 @@ final class ChatViewModel: ObservableObject {
     @Published var inputText: String = ""
     @Published var isLoading: Bool = false
     @Published var currentAgent: String = AgentInfo.entryAgentName
+    @Published var currentModel: String?
     @Published var activeToolName: String?
     @Published var pendingPermissionCount: Int = 0
     @Published var sessionId: String = UUID().uuidString
@@ -114,6 +115,7 @@ final class ChatViewModel: ObservableObject {
 
         isLoading = true
         currentAgent = AgentInfo.entryAgentName
+        currentModel = nil
 
         Task {
             guard await ensureBackendReadyForUserAction(messageId: assistantMsg.id) else {
@@ -240,6 +242,7 @@ final class ChatViewModel: ObservableObject {
         case "agent":
             if let name = event.stringValue("name") {
                 currentAgent = name
+                currentModel = event.stringValue("model")
                 messages[messageIndex].agent = name
                 activeToolName = nil
             }
@@ -701,6 +704,7 @@ final class ChatViewModel: ObservableObject {
         activeToolName = nil
         isLoading = false
         currentAgent = AgentInfo.entryAgentName
+        currentModel = nil
         draftAttachments = []
         selectedProjectPath = nil
         reviewState.selectedReviewProjectPath = nil
@@ -721,6 +725,7 @@ final class ChatViewModel: ObservableObject {
         activeToolName = nil
         isLoading = false
         currentAgent = AgentInfo.entryAgentName
+        currentModel = nil
         draftAttachments = []
         selectedSurface = .chat
     }
@@ -1005,6 +1010,7 @@ final class ChatViewModel: ObservableObject {
         activeToolName = nil
         pendingPermissionCount = 0
         currentAgent = AgentInfo.entryAgentName
+        currentModel = nil
     }
 
     private func chatMessage(from info: SessionMessageInfo) -> ChatMessage {

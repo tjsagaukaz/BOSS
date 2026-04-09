@@ -4,14 +4,14 @@ import SwiftUI
 // MARK: - Typography Tokens
 
 private enum Typo {
-    static let primaryText   = Color.white.opacity(0.92)
-    static let secondaryText = Color.white.opacity(0.55)
-    static let tertiaryText  = Color.white.opacity(0.35)
+    static let primaryText   = Color(red: 0.957, green: 0.957, blue: 0.961)   // #F4F4F5  Zinc-100
+    static let secondaryText = Color(red: 0.631, green: 0.631, blue: 0.667)  // #A1A1AA  Zinc-400
+    static let tertiaryText  = Color(red: 0.44, green: 0.44, blue: 0.46)      // #707074  Zinc-500
 
     static let bodySize: CGFloat   = 15
-    static let lineGap: CGFloat    = 7
+    static let lineGap: CGFloat    = 9
     static let tracking: CGFloat   = -0.15
-    static let paragraphGap: CGFloat = 12
+    static let paragraphGap: CGFloat = 16
 }
 
 // MARK: - Chat View
@@ -60,18 +60,9 @@ struct ChatView: View {
                             .padding(.top, 8)
                             .padding(.bottom, 4)
                         } else {
-                            VStack(spacing: 8) {
-                                Text("Boss")
-                                    .font(.system(size: 22, weight: .semibold))
-                                    .foregroundColor(Typo.primaryText)
-                                    .tracking(-0.3)
-                                Text("Ready. Ask anything.")
-                                    .font(.system(size: 14))
-                                    .foregroundColor(Typo.tertiaryText)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 120)
-                            .padding(.bottom, 60)
+                            EmptyStateView()
+                                .padding(.top, 100)
+                                .padding(.bottom, 40)
                         }
 
                         // Message flow
@@ -159,13 +150,7 @@ private struct SystemStateBarView: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Circle()
-                .fill(
-                    vm.pendingPermissionCount > 0
-                        ? Color.white.opacity(0.5)
-                        : vm.isLoading ? BossColor.accent.opacity(0.8) : Color.white.opacity(0.15)
-                )
-                .frame(width: 5, height: 5)
+            StatusDotView(isLoading: vm.isLoading, hasPending: vm.pendingPermissionCount > 0)
                 .accessibilityHidden(true)
 
             if vm.pendingPermissionCount > 0 {
@@ -189,11 +174,111 @@ private struct SystemStateBarView: View {
             }
 
             Spacer()
+
+            if let model = vm.currentModel, vm.isLoading {
+                Text(model)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(Typo.tertiaryText)
+            }
         }
         .frame(height: 22)
         .padding(.horizontal, 24)
         .padding(.bottom, 6)
         .animation(.easeOut(duration: 0.14), value: vm.isLoading)
+    }
+}
+
+// MARK: - Empty State (fresh chat launchpad)
+
+private struct EmptyStateView: View {
+    @EnvironmentObject var vm: ChatViewModel
+
+    var body: some View {
+        VStack(spacing: 32) {
+            // Identity
+            VStack(spacing: 6) {
+                Text("Boss")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(Typo.primaryText)
+                    .tracking(-0.5)
+                Text(statusLine)
+                    .font(.system(size: 13))
+                    .foregroundColor(Typo.tertiaryText)
+            }
+
+            // Quick actions
+            VStack(spacing: 6) {
+                quickAction(icon: "arrow.clockwise", label: "Scan system for projects", shortcut: nil) {
+                    vm.scanSystem()
+                }
+                quickAction(icon: "brain", label: "Open memory", shortcut: "⌘2") {
+                    vm.showMemory()
+                }
+                quickAction(icon: "eye", label: "Review workspace", shortcut: "⌘3") {
+                    vm.showReview()
+                }
+                quickAction(icon: "shippingbox", label: "Deploy dashboard", shortcut: "⌘4") {
+                    vm.showDeploy()
+                }
+            }
+            .frame(maxWidth: 320)
+
+            // Mode indicator
+            HStack(spacing: 16) {
+                ForEach(WorkMode.allCases, id: \.rawValue) { mode in
+                    Button {
+                        vm.selectMode(mode)
+                    } label: {
+                        Text(mode.label)
+                            .font(.system(size: 11, weight: vm.selectedMode == mode ? .semibold : .medium))
+                            .foregroundColor(vm.selectedMode == mode ? Typo.primaryText : Typo.tertiaryText)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(vm.selectedMode == mode ? Color.white.opacity(0.08) : .clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var statusLine: String {
+        if let status = vm.systemStatus, let provider = status.providerMode {
+            return "\(provider) · Ready"
+        }
+        return "Ready"
+    }
+
+    private func quickAction(icon: String, label: String, shortcut: String?, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Typo.secondaryText)
+                    .frame(width: 20)
+                Text(label)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.55))
+                Spacer()
+                if let shortcut {
+                    Text(shortcut)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(Typo.tertiaryText.opacity(0.6))
+                }
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white.opacity(0.03))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -372,9 +457,15 @@ private struct InputBarView: View {
                 .fill(.ultraThinMaterial)
                 .overlay(
                     RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        .stroke(
+                            inputFocused
+                                ? BossColor.accent.opacity(0.35)
+                                : Color.white.opacity(0.1),
+                            lineWidth: 1
+                        )
                 )
         )
+        .animation(.easeInOut(duration: 0.15), value: inputFocused)
         .padding(.horizontal, 20)
     }
 
@@ -524,47 +615,24 @@ struct MessageView: View {
                     .padding(.bottom, 8)
             }
 
+            // Thinking / Reasoning block — appears above content
+            if message.isStreaming, let thinking = message.thinkingContent {
+                ThinkingBlockView(thinkingContent: thinking, isStreaming: true, showThinking: $showThinking)
+                    .padding(.bottom, message.content.isEmpty ? 0 : 10)
+            } else if let thinking = message.thinkingContent, !thinking.isEmpty {
+                ThinkingBlockView(thinkingContent: thinking, isStreaming: false, showThinking: $showThinking)
+                    .padding(.bottom, message.content.isEmpty ? 0 : 10)
+            }
+
             // Content: always render through markdown parser (streaming and finalized)
             if !message.content.isEmpty {
                 StreamingMarkdownView(content: message.content, isStreaming: message.isStreaming)
             }
 
-            // Streaming dots
-            if message.isStreaming && message.content.isEmpty {
-                HStack(spacing: 5) {
-                    Circle().fill(Typo.tertiaryText).frame(width: 3, height: 3)
-                    Circle().fill(Typo.tertiaryText.opacity(0.6)).frame(width: 3, height: 3)
-                    Circle().fill(Typo.tertiaryText.opacity(0.3)).frame(width: 3, height: 3)
-                }
-                .padding(.top, 4)
-            }
-
-            // Thinking
-            if let thinking = message.thinkingContent, !thinking.isEmpty {
-                Button(action: { showThinking.toggle() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .semibold))
-                            .rotationEffect(.degrees(showThinking ? 90 : 0))
-                        Text("Reasoning")
-                            .font(.system(size: 11))
-                    }
-                    .foregroundColor(Typo.tertiaryText)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(showThinking ? "Hide reasoning" : "Show reasoning")
-                .padding(.top, 10)
-                .animation(.easeOut(duration: 0.14), value: showThinking)
-
-                if showThinking {
-                    Text(thinking)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor(Typo.tertiaryText)
-                        .lineSpacing(4)
-                        .tracking(0)
-                        .padding(.leading, 12)
-                        .padding(.top, 4)
-                }
+            // Block cursor — waiting for first token (no thinking yet either)
+            if message.isStreaming && message.content.isEmpty && message.thinkingContent == nil {
+                BlockCursorView()
+                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: 640, alignment: .leading)
@@ -897,5 +965,152 @@ private struct ScrollBottomOffsetKey: PreferenceKey {
     nonisolated(unsafe) static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+// MARK: - Block Cursor (terminal-style waiting indicator)
+
+private struct BlockCursorView: View {
+    @State private var pulsing = false
+
+    var body: some View {
+        Text("█")
+            .font(.system(size: 14, design: .monospaced))
+            .foregroundColor(BossColor.accent.opacity(pulsing ? 1.0 : 0.3))
+            .animation(
+                .easeInOut(duration: 0.9).repeatForever(autoreverses: true),
+                value: pulsing
+            )
+            .onAppear { pulsing = true }
+    }
+}
+
+// MARK: - Status Bar Heartbeat Dot
+
+private struct StatusDotView: View {
+    let isLoading: Bool
+    let hasPending: Bool
+
+    @State private var breathing = false
+
+    var body: some View {
+        Circle()
+            .fill(dotColor)
+            .frame(width: 5, height: 5)
+            .opacity(isLoading && !hasPending ? (breathing ? 1.0 : 0.2) : 1.0)
+            .animation(
+                isLoading && !hasPending
+                    ? .easeInOut(duration: 1.5).repeatForever(autoreverses: true)
+                    : .default,
+                value: breathing
+            )
+            .onChange(of: isLoading) { _, loading in
+                breathing = loading
+            }
+            .onAppear { breathing = isLoading }
+    }
+
+    private var dotColor: Color {
+        if hasPending { return Color.white.opacity(0.5) }
+        if isLoading { return BossColor.accent.opacity(0.8) }
+        return Color.white.opacity(0.15)
+    }
+}
+
+// MARK: - Thinking Block (structural reasoning anticipation)
+
+private struct ThinkingBlockView: View {
+    let thinkingContent: String
+    let isStreaming: Bool
+    @Binding var showThinking: Bool
+
+    @State private var breathing = false
+    @State private var thinkingStarted: Date?
+    @State private var thinkingElapsed: TimeInterval = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button(action: { withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { showThinking.toggle() } }) {
+                HStack(spacing: 0) {
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(edgeColor)
+                        .frame(width: 2, height: 14)
+                        .padding(.trailing, 8)
+                        .animation(
+                            isStreaming
+                                ? .easeInOut(duration: 1.2).repeatForever(autoreverses: true)
+                                : .default,
+                            value: breathing
+                        )
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .rotationEffect(.degrees(showThinking ? 90 : 0))
+                        .padding(.trailing, 4)
+                    headerLabel
+                }
+                .foregroundColor(Color(hex: "#707074"))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(showThinking ? "Hide reasoning" : "Show reasoning")
+
+            if showThinking && !thinkingContent.isEmpty {
+                Text(thinkingContent)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(Color(hex: "#707074"))
+                    .lineSpacing(4)
+                    .tracking(0)
+                    .padding(.leading, 14)
+                    .padding(.top, 6)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showThinking)
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isStreaming)
+        .onAppear {
+            breathing = isStreaming
+            if isStreaming && thinkingStarted == nil {
+                thinkingStarted = Date()
+            }
+        }
+        .onChange(of: isStreaming) { _, streaming in
+            breathing = streaming
+            if !streaming, let started = thinkingStarted {
+                thinkingElapsed = Date().timeIntervalSince(started)
+                // Auto-collapse when streaming ends
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    showThinking = false
+                }
+            }
+        }
+        .onChange(of: thinkingContent) { _, content in
+            if !content.isEmpty && thinkingStarted == nil {
+                thinkingStarted = Date()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var headerLabel: some View {
+        if isStreaming && thinkingContent.isEmpty {
+            Text("Reasoning…")
+                .font(.system(size: 11, weight: .medium))
+        } else if !isStreaming && thinkingElapsed > 0 {
+            HStack(spacing: 5) {
+                Image(systemName: "brain")
+                    .font(.system(size: 9, weight: .medium))
+                Text(String(format: "Reasoned for %.1fs", thinkingElapsed))
+                    .font(.system(size: 11, weight: .medium))
+            }
+        } else {
+            Text("Reasoning")
+                .font(.system(size: 11, weight: .medium))
+        }
+    }
+
+    private var edgeColor: Color {
+        if isStreaming {
+            return Color(hex: "#A1A1AA").opacity(breathing ? 0.6 : 0.15)
+        }
+        return Color(hex: "#A1A1AA").opacity(0.25)
     }
 }

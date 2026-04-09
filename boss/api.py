@@ -830,7 +830,11 @@ async def _stream_chat_run(
                     log_agent_change(from_agent=current_agent_name, to_agent=event.new_agent.name)
                     current_agent_name = event.new_agent.name
                     set_active_agent(current_agent_name)
-                    yield sse_event({"type": "agent", "name": event.new_agent.name})
+                    agent_model = getattr(event.new_agent, "model", None)
+                    agent_event: dict[str, object] = {"type": "agent", "name": event.new_agent.name}
+                    if agent_model:
+                        agent_event["model"] = str(agent_model)
+                    yield sse_event(agent_event)
 
                 elif isinstance(event, RunItemStreamEvent):
                     item = event.item

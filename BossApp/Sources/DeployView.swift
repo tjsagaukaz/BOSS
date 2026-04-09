@@ -7,7 +7,7 @@ struct DeployView: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 24) {
                 header
-                    .padding(.top, 80)
+                    .padding(.top, 16)
 
                 if let error = vm.deployState.deployRefreshError {
                     InlineStatusBanner(message: error)

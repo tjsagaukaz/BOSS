@@ -5,11 +5,20 @@ import UserNotifications
 
 struct ContentView: View {
     @EnvironmentObject var vm: ChatViewModel
+    @State private var showCommandPalette: Bool = false
 
     var body: some View {
-        mainLayout
-            .animation(.easeOut(duration: 0.22), value: vm.pendingPermissionCount > 0)
-            .modifier(SurfaceKeyboardShortcuts(vm: vm))
+        ZStack {
+            mainLayout
+                .animation(.easeOut(duration: 0.22), value: vm.pendingPermissionCount > 0)
+                .modifier(SurfaceKeyboardShortcuts(vm: vm, showCommandPalette: $showCommandPalette))
+
+            if showCommandPalette {
+                CommandPaletteView(isPresented: $showCommandPalette)
+                    .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: showCommandPalette)
     }
 
     private var mainLayout: some View {
@@ -59,7 +68,7 @@ struct ContentView: View {
         case .workers:
             WorkersView()
         case .deploy:
-            DeployView()
+            UnifiedDeployView()
         case .iosDelivery:
             IOSDeliveryView()
         case .settings:
@@ -105,22 +114,30 @@ private struct PermissionBanner: View {
 
 private struct SurfaceKeyboardShortcuts: ViewModifier {
     @ObservedObject var vm: ChatViewModel
+    @Binding var showCommandPalette: Bool
 
     private static let surfaceMap: [Character: AppSurface] = [
-        "1": .chat, "2": .memory, "3": .diagnostics,
-        "4": .jobs, "5": .review, "6": .permissions,
-        "7": .preview, "8": .workers, "9": .deploy,
-        "0": .iosDelivery
+        "1": .chat, "2": .memory, "3": .review,
+        "4": .deploy, "5": .settings
     ]
 
     func body(content: Content) -> some View {
         content
             .onKeyPress(.escape) {
+                if showCommandPalette {
+                    showCommandPalette = false
+                    return .handled
+                }
                 if vm.selectedSurface != .chat {
                     vm.selectedSurface = .chat
                     return .handled
                 }
                 return .ignored
+            }
+            .onKeyPress(characters: CharacterSet(charactersIn: "kK"), phases: .down) { press in
+                guard press.modifiers == .command else { return .ignored }
+                showCommandPalette.toggle()
+                return .handled
             }
             .onKeyPress(characters: CharacterSet(charactersIn: "1234567890"), phases: .down) { press in
                 guard press.modifiers == .command,
@@ -166,56 +183,20 @@ struct SidebarView: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 8)
 
-            sidebarNavRow("Memory", selected: vm.selectedSurface == .memory) {
+            sidebarNavRow("Memory", icon: "brain", selected: vm.selectedSurface == .memory) {
                 vm.showMemory()
             }
             .padding(.horizontal, 8)
-            .padding(.bottom, 4)
+            .padding(.bottom, 2)
 
-            sidebarNavRow("Diagnostics", selected: vm.selectedSurface == .diagnostics) {
-                vm.showDiagnostics()
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-
-            sidebarNavRow("Jobs", selected: vm.selectedSurface == .jobs) {
-                vm.showJobs()
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-
-            sidebarNavRow("Review", selected: vm.selectedSurface == .review) {
+            sidebarNavRow("Review", icon: "eye", selected: vm.selectedSurface == .review) {
                 vm.showReview()
             }
             .padding(.horizontal, 8)
-            .padding(.bottom, 4)
+            .padding(.bottom, 2)
 
-            sidebarNavRow("Permissions", selected: vm.selectedSurface == .permissions) {
-                vm.showPermissions()
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-
-            sidebarNavRow("Preview", selected: vm.selectedSurface == .preview) {
-                vm.showPreview()
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-
-            sidebarNavRow("Workers", selected: vm.selectedSurface == .workers) {
-                vm.showWorkers()
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-
-            sidebarNavRow("Deploy", selected: vm.selectedSurface == .deploy) {
+            sidebarNavRow("Deploy", icon: "shippingbox", selected: vm.selectedSurface == .deploy) {
                 vm.showDeploy()
-            }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-
-            sidebarNavRow("iOS Delivery", selected: vm.selectedSurface == .iosDelivery) {
-                vm.showIOSDelivery()
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 12)
@@ -231,7 +212,7 @@ struct SidebarView: View {
             }
 
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 24) {
                     if !vm.savedSessions.isEmpty {
                         sectionHeader("Recent")
 
@@ -253,25 +234,8 @@ struct SidebarView: View {
                         }
                         .padding(.horizontal, 8)
                     }
-
-                    if !sidebarMemoryItems.isEmpty || !vm.facts.isEmpty {
-                        sectionHeader("Memory")
-
-                        VStack(spacing: 2) {
-                            if !sidebarMemoryItems.isEmpty {
-                                ForEach(sidebarMemoryItems.prefix(8)) { item in
-                                    memoryPreviewRow(item)
-                                }
-                            } else {
-                                ForEach(vm.facts.prefix(8)) { fact in
-                                    factRow(fact)
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 8)
-                    }
                 }
-                .padding(.top, 12)
+                .padding(.top, 16)
                 .padding(.bottom, 20)
             }
 
@@ -306,10 +270,11 @@ struct SidebarView: View {
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title.uppercased())
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(BossColor.textSecondary.opacity(0.4))
-            .tracking(1.2)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(Color(hex: "#A1A1AA").opacity(0.45))
+            .tracking(1.8)
             .padding(.horizontal, 16)
+            .padding(.top, 4)
     }
 
     private func sidebarActionRow(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
@@ -331,12 +296,21 @@ struct SidebarView: View {
         .buttonStyle(.plain)
     }
 
-    private func sidebarNavRow(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func sidebarNavRow(_ title: String, icon: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(selected ? BossColor.accent : .clear)
+                    .frame(width: 3, height: 16)
+                    .padding(.trailing, 7)
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                    .foregroundColor(selected ? .white : Color.white.opacity(0.45))
+                    .frame(width: 20)
+                    .padding(.trailing, 6)
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(selected ? .white : Color.white.opacity(0.58))
+                    .font(.system(size: 13, weight: selected ? .semibold : .medium))
+                    .foregroundColor(selected ? .white : Color.white.opacity(0.50))
                 Spacer()
             }
             .padding(.vertical, 7)
@@ -348,6 +322,7 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.15), value: selected)
     }
 
     private func sessionRow(_ session: (id: String, title: String, updatedAt: Date)) -> some View {
@@ -355,7 +330,11 @@ struct SidebarView: View {
         return Button {
             vm.loadSession(session.id)
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(isActive ? BossColor.accent : .clear)
+                    .frame(width: 3, height: 14)
+                    .padding(.trailing, 7)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.title)
                         .font(.system(size: 12))
@@ -376,6 +355,7 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.15), value: isActive)
         .contextMenu {
             Button(role: .destructive) {
                 vm.deleteSession(session.id)
@@ -390,7 +370,11 @@ struct SidebarView: View {
         return Button {
             vm.showMemory(projectPath: isSelected ? nil : project.path)
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(isSelected ? BossColor.accent : .clear)
+                    .frame(width: 3, height: 14)
+                    .padding(.trailing, 7)
                 Text(project.name)
                     .font(.system(size: 13))
                     .foregroundColor(isSelected ? .white : Color.white.opacity(0.5))
@@ -412,6 +396,7 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .animation(.easeInOut(duration: 0.15), value: isSelected)
     }
 
     private func memoryPreviewRow(_ item: MemoryRecord) -> some View {

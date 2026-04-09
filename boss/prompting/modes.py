@@ -146,8 +146,14 @@ def specialist_handoff_hints() -> str:
     """One-line descriptions of specialist agents available for handoff."""
     return (
         "Specialist handoffs (use only when clearly needed):\n"
-        "- mac: macOS system inspection and automation\n"
-        "- research: research with optional web search\n"
-        "- reasoning: complex multi-step analysis\n"
-        "- code: software engineering, debugging, code review"
+        "- code: codebase audits, code review, debugging, refactoring, "
+        "architecture analysis, symbol search, project inspection. "
+        "Prefer this agent for any task involving reading or modifying code.\n"
+        "- reasoning: complex multi-step analysis, planning, trade-off "
+        "evaluation, problem decomposition\n"
+        "- research: web search for external/current information (docs, "
+        "articles, APIs, versions). Only use when the answer requires "
+        "information beyond the local codebase.\n"
+        "- mac: macOS system automation, AppleScript, clipboard, "
+        "screenshots, file search, notifications"
     )

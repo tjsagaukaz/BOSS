@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import HighlightSwift
 
@@ -333,11 +334,11 @@ enum MarkdownParser {
 // MARK: - Typography
 
 enum MDTypo {
-    static let primaryText = Color.white.opacity(0.92)
-    static let secondaryText = Color.white.opacity(0.55)
-    static let tertiaryText = Color.white.opacity(0.35)
+    static let primaryText = Color(red: 0.957, green: 0.957, blue: 0.961)   // #F4F4F5  Zinc-100
+    static let secondaryText = Color(red: 0.631, green: 0.631, blue: 0.667)  // #A1A1AA  Zinc-400
+    static let tertiaryText = Color(red: 0.44, green: 0.44, blue: 0.46)      // #707074  Zinc-500
     static let bodySize: CGFloat = 15
-    static let lineGap: CGFloat = 7
+    static let lineGap: CGFloat = 9
     static let tracking: CGFloat = -0.15
 }
 
@@ -380,11 +381,11 @@ struct InlineTextView: View {
         case .text(let str):
             return Text(str)
         case .bold(let str):
-            return Text(str).bold()
+            return Text(str).fontWeight(.semibold)
         case .italic(let str):
             return Text(str).italic()
         case .boldItalic(let str):
-            return Text(str).bold().italic()
+            return Text(str).fontWeight(.semibold).italic()
         case .code(let str):
             var attr = AttributedString(" \(str) ")
             attr.font = .system(size: MDTypo.bodySize - 1, design: .monospaced)
@@ -393,7 +394,7 @@ struct InlineTextView: View {
             return Text(attr)
         case .link(let text, let url):
             var attrStr = AttributedString(text)
-            attrStr.foregroundColor = .init(red: 0.4, green: 0.7, blue: 1.0)
+            attrStr.foregroundColor = MDTypo.primaryText
             attrStr.underlineStyle = .single
             if let linkURL = URL(string: url) {
                 attrStr.link = linkURL
@@ -413,7 +414,7 @@ struct MarkdownBlocksView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             ForEach(nodes) { node in
                 MarkdownNodeView(node: node)
             }
@@ -426,9 +427,12 @@ private struct CodeBlockContainer: View {
     let code: String
 
     @State private var highlightedText: Text?
+    @State private var isHovering = false
+    @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Title bar
             HStack(spacing: 6) {
                 Circle().fill(Color.red.opacity(0.8)).frame(width: 8, height: 8)
                 Circle().fill(Color.yellow.opacity(0.8)).frame(width: 8, height: 8)
@@ -441,11 +445,33 @@ private struct CodeBlockContainer: View {
                         .foregroundColor(MDTypo.tertiaryText)
                         .tracking(0.4)
                 }
+
+                // Copy button — reveals on hover
+                if isHovering || copied {
+                    Button(action: copyCode) {
+                        HStack(spacing: 4) {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10, weight: .medium))
+                            Text(copied ? "Copied" : "Copy")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(copied ? Color.green.opacity(0.7) : Color.white.opacity(0.45))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .contentTransition(.symbolEffect(.replace))
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.top, 10)
             .padding(.bottom, 8)
-            .background(Color.white.opacity(0.025))
+            .background(Color(hex: "#18181B").opacity(0.6))
 
             ScrollView(.horizontal, showsIndicators: false) {
                 (highlightedText ?? fallbackText)
@@ -459,12 +485,17 @@ private struct CodeBlockContainer: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.035))
+                .fill(Color(hex: "#18181B"))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                .stroke(Color(hex: "#27272A"), lineWidth: 1)
         )
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
         .task(id: code) {
             await highlight()
         }
@@ -473,6 +504,15 @@ private struct CodeBlockContainer: View {
     private var fallbackText: Text {
         Text(code)
             .foregroundColor(Color.white.opacity(0.82))
+    }
+
+    private func copyCode() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(code, forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            copied = false
+        }
     }
 
     private func highlight() async {
@@ -520,25 +560,25 @@ private struct MarkdownNodeView: View {
     }
 
     private func headingView(level: Int, text: String) -> some View {
-        let style: (CGFloat, Font.Weight) = {
+        let style: (CGFloat, Font.Weight, CGFloat) = {
             switch level {
-            case 1: return (22, .semibold)
-            case 2: return (19, .semibold)
-            case 3: return (17, .medium)
-            default: return (15, .medium)
+            case 1: return (24, .bold, -0.6)
+            case 2: return (20, .semibold, -0.5)
+            case 3: return (17, .semibold, -0.3)
+            default: return (15, .medium, -0.2)
             }
         }()
 
         return InlineTextView(text).textContent
             .font(.system(size: style.0, weight: style.1))
-            .tracking(-0.5)
+            .tracking(style.2)
             .foregroundColor(MDTypo.primaryText)
-            .padding(.top, level == 1 ? 24 : level == 2 ? 20 : 12)
+            .padding(.top, level == 1 ? 28 : level == 2 ? 22 : 14)
             .textSelection(.enabled)
     }
 
     private func paragraphView(_ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 5) {
             ForEach(Array(text.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
                 InlineTextView(line).textContent
                     .font(.system(size: MDTypo.bodySize))
@@ -570,7 +610,7 @@ private struct MarkdownNodeView: View {
     }
 
     private func listView(ordered: Bool, items: [[MarkdownNode]]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(items.enumerated()), id: \.offset) { index, itemNodes in
                 HStack(alignment: .top, spacing: 8) {
                     if let checkboxState = checkboxState(in: itemNodes) {

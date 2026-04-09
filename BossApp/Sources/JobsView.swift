@@ -31,7 +31,7 @@ struct JobsView: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 24) {
                 header
-                    .padding(.top, 80)
+                    .padding(.top, 16)
 
                 if let message = vm.jobsState.jobsRefreshError {
                     InlineStatusBanner(message: message)

@@ -20,6 +20,7 @@ struct SettingsView: View {
                 appearanceSection
                 chatSection
                 memorySection
+                adminSection
                 backendSection
                 aboutSection
             }
@@ -113,6 +114,50 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Admin
+
+    private var adminSection: some View {
+        SettingsCard(title: "Admin") {
+            VStack(alignment: .leading, spacing: 4) {
+                adminNavButton("Diagnostics", icon: "stethoscope") {
+                    vm.showDiagnostics()
+                }
+                adminNavButton("Permissions", icon: "lock.shield") {
+                    vm.showPermissions()
+                }
+                adminNavButton("Workers", icon: "server.rack") {
+                    vm.showWorkers()
+                }
+            }
+        }
+    }
+
+    private func adminNavButton(_ label: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.5))
+                    .frame(width: 18)
+                Text(label)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(Color.white.opacity(0.72))
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Color.white.opacity(0.25))
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white.opacity(0.03))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Backend

@@ -29,9 +29,9 @@ enum BossColor {
     // Divider
     static let divider = Color.white.opacity(0.06)
 
-    // Red accent — tight, controlled
-    static let accent     = Color(hex: "#FF3B30")
-    static let accentSoft = Color(hex: "#FF453A").opacity(0.18)
+    // Neon red-orange accent — deliberate, searing
+    static let accent     = Color(hex: "#FF4D4F")
+    static let accentSoft = Color(hex: "#FF4D4F").opacity(0.14)
 }
 
 enum AppSurface: Equatable {

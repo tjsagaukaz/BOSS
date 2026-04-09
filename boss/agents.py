@@ -195,9 +195,12 @@ def build_entry_agent(
 
     # General is the actual entry point. It answers directly when it can
     # and hands off to specialists only when a narrower toolset is useful.
+    # In review/audit mode, use the full model for deeper analysis.
+    entry_model = settings.code_model if resolved_mode == "review" else settings.general_model
+
     return Agent(
         name="general",
-        model=settings.general_model,
+        model=entry_model,
         instructions=_build_instructions(
             agent_name="general",
             mode=resolved_mode,
