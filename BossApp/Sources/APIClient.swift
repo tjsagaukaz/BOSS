@@ -50,6 +50,22 @@ enum APIError: LocalizedError {
 
 // MARK: - API Client
 
+// ISO 8601 date strategy that handles fractional seconds (e.g. .834877)
+// which Foundation's built-in .iso8601 does not support.
+private let iso8601WithFractional: JSONDecoder.DateDecodingStrategy = {
+    let plain = ISO8601DateFormatter()
+    plain.formatOptions = [.withInternetDateTime]
+    let frac = ISO8601DateFormatter()
+    frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return .custom { decoder in
+        let s = try decoder.singleValueContainer().decode(String.self)
+        if let d = frac.date(from: s) { return d }
+        if let d = plain.date(from: s) { return d }
+        throw DecodingError.dataCorruptedError(in: try decoder.singleValueContainer(),
+                                                debugDescription: "Invalid ISO 8601 date: \(s)")
+    }
+}()
+
 final class APIClient: Sendable {
     static let shared = APIClient()
 
@@ -131,7 +147,7 @@ final class APIClient: Sendable {
             MemoryStats.self,
             from: data,
             context: "/api/memory/stats",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -148,7 +164,7 @@ final class APIClient: Sendable {
             MemoryOverview.self,
             from: data,
             context: "/api/memory/overview",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -158,7 +174,7 @@ final class APIClient: Sendable {
             [PermissionEntry].self,
             from: data,
             context: "/api/permissions",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -168,7 +184,7 @@ final class APIClient: Sendable {
             SystemStatusInfo.self,
             from: data,
             context: "/api/system/status",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -220,7 +236,7 @@ final class APIClient: Sendable {
             ReviewCapabilitiesInfo.self,
             from: data,
             context: "/api/review/capabilities",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -232,7 +248,7 @@ final class APIClient: Sendable {
             [ReviewRunInfo].self,
             from: data,
             context: "/api/review/history",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -265,7 +281,7 @@ final class APIClient: Sendable {
             ReviewRunInfo.self,
             from: data,
             context: "/api/review/run",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -277,7 +293,7 @@ final class APIClient: Sendable {
             [BackgroundJobInfo].self,
             from: data,
             context: "/api/jobs",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -287,7 +303,7 @@ final class APIClient: Sendable {
             BackgroundJobInfo.self,
             from: data,
             context: "/api/jobs/\(jobId)",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -316,7 +332,7 @@ final class APIClient: Sendable {
             BackgroundJobInfo.self,
             from: data,
             context: "/api/jobs",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -328,7 +344,7 @@ final class APIClient: Sendable {
             BackgroundJobLogTailInfo.self,
             from: data,
             context: "/api/jobs/\(jobId)/logs",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -338,7 +354,7 @@ final class APIClient: Sendable {
             BackgroundJobInfo.self,
             from: data,
             context: "/api/jobs/\(jobId)/cancel",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -348,7 +364,7 @@ final class APIClient: Sendable {
             BackgroundJobInfo.self,
             from: data,
             context: "/api/jobs/\(jobId)/resume",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 
@@ -358,7 +374,7 @@ final class APIClient: Sendable {
             BackgroundJobTakeoverInfo.self,
             from: data,
             context: "/api/jobs/\(jobId)/takeover",
-            dateDecodingStrategy: .iso8601
+            dateDecodingStrategy: iso8601WithFractional
         )
     }
 

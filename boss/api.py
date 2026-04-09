@@ -2394,6 +2394,33 @@ async def prompt_diagnostics(mode: str = "agent", agent_name: str = "general", t
     }
 
 
+@app.get("/api/system/ios-project")
+async def ios_project_info(project_path: str | None = None):
+    """Inspect an Xcode / iOS project and return structured intelligence."""
+    from boss.intelligence.xcode import inspect_xcode_project
+
+    path = project_path or str(default_workspace_root())
+    info = inspect_xcode_project(path)
+    return info.to_dict()
+
+
+@app.get("/api/system/ios-toolchain")
+async def ios_toolchain_status(refresh: bool = False):
+    """Return the detected iOS toolchain availability."""
+    from boss.ios_delivery.toolchain import get_toolchain
+
+    toolchain = get_toolchain(refresh=refresh)
+    return toolchain.to_dict()
+
+
+@app.get("/api/system/ios-signing")
+async def ios_signing_readiness():
+    """Return signing credential readiness without leaking secrets."""
+    from boss.ios_delivery.signing import check_signing_readiness
+
+    return check_signing_readiness().to_dict()
+
+
 @app.get("/api/system/providers")
 async def provider_status():
     """Return provider registry: providers, capabilities, routing, and health."""
@@ -2848,3 +2875,68 @@ async def cancel_deployment_endpoint(deployment_id: str):
         return deploy.to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# --- iOS delivery endpoints ---
+
+
+@app.get("/api/ios-delivery/status")
+async def ios_delivery_status_endpoint():
+    from boss.ios_delivery.engine import delivery_status
+    return delivery_status()
+
+
+@app.get("/api/ios-delivery/runs")
+async def ios_delivery_list_runs(limit: int = 50):
+    from boss.ios_delivery.state import list_runs
+    safe_limit = max(1, min(limit, 200))
+    return [r.to_dict() for r in list_runs(limit=safe_limit)]
+
+
+@app.get("/api/ios-delivery/runs/{run_id}")
+async def ios_delivery_get_run(run_id: str):
+    from boss.ios_delivery.state import load_run
+    run = load_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="iOS delivery run not found")
+    return run.to_dict()
+
+
+@app.get("/api/ios-delivery/runs/{run_id}/events")
+async def ios_delivery_get_events(run_id: str):
+    from boss.ios_delivery.state import load_run, read_events
+    run = load_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="iOS delivery run not found")
+    return read_events(run_id)
+
+
+@app.post("/api/ios-delivery/runs")
+async def ios_delivery_create_run(request: Request):
+    from boss.ios_delivery.engine import create_run
+    body = await request.json()
+    project_path = body.get("project_path", "").strip()
+    if not project_path:
+        raise HTTPException(status_code=400, detail="project_path is required")
+    try:
+        run = create_run(
+            project_path=project_path,
+            scheme=body.get("scheme") or None,
+            configuration=body.get("configuration", "Release"),
+            export_method=body.get("export_method", "app-store"),
+            upload_target=body.get("upload_target", "none"),
+        )
+        return run.to_dict()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/ios-delivery/runs/{run_id}/cancel")
+async def ios_delivery_cancel_run(run_id: str):
+    from boss.ios_delivery.engine import cancel_run
+    from boss.ios_delivery.state import load_run
+    run = load_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="iOS delivery run not found")
+    run = cancel_run(run)
+    return run.to_dict()

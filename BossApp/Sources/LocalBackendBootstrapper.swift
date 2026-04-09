@@ -20,11 +20,14 @@ actor LocalBackendBootstrapper {
         }
 
         let interpreter = workspaceRoot.appendingPathComponent(".venv/bin/python")
-        if let status = try? await api.fetchSystemStatus() {
+        do {
+            let status = try await api.fetchSystemStatus()
             if statusMatches(status, expectedWorkspaceRoot: workspaceRoot, expectedInterpreter: interpreter) {
                 return .ready
             }
             return .warning(mismatchMessage(for: status, expectedWorkspaceRoot: workspaceRoot, expectedInterpreter: interpreter))
+        } catch {
+            // Status fetch failed — backend may not be running yet.
         }
 
         guard FileManager.default.isExecutableFile(atPath: interpreter.path) else {
@@ -133,6 +136,12 @@ actor LocalBackendBootstrapper {
     }
 
     private func resolveWorkspaceRoot() -> URL? {
+        // Fast path: check the known workspace location first
+        let knownRoot = URL(fileURLWithPath: "/Users/tj/boss")
+        if isWorkspaceRoot(knownRoot) {
+            return knownRoot
+        }
+
         var candidates: [URL] = []
         let env = ProcessInfo.processInfo.environment
         if let configuredRoot = env["BOSS_WORKSPACE_ROOT"], !configuredRoot.isEmpty {

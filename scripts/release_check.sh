@@ -77,6 +77,9 @@ cd "$ROOT"
 echo "-- Backend regression harness"
 "$PYTHON" -m unittest discover -s "$ROOT/tests" -p 'test_regression_harness.py'
 
+echo "-- Full test suite"
+"$PYTHON" -m unittest discover -s "$ROOT/tests" -v
+
 echo "-- Local doctor"
 "$PYTHON" "$ROOT/scripts/dev_doctor.py"
 

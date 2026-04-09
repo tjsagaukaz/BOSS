@@ -884,9 +884,9 @@ class TestDeployStatusEnabledFlag(unittest.TestCase):
 class TestCancelDeploymentRegistry(unittest.TestCase):
     """Finding 2: cancel_deployment must signal in-flight pipelines."""
 
-    def _cleanup_cancelled(self, deployment_id):
+    def tearDown(self):
         with _cancel_lock:
-            _cancelled_ids.discard(deployment_id)
+            _cancelled_ids.clear()
 
     def test_cancel_sets_registry_flag(self):
         with isolated_deploys_dir():
@@ -900,7 +900,6 @@ class TestCancelDeploymentRegistry(unittest.TestCase):
             save_deployment(d)
             cancel_deployment("cancel-reg-001")
             self.assertTrue(is_cancelled("cancel-reg-001"))
-            self._cleanup_cancelled("cancel-reg-001")
 
     def test_run_checks_cancellation_between_phases(self):
         """Pipeline should abort between build and deploy if cancelled."""

@@ -2837,59 +2837,60 @@ class TestLoopStatePersistence(unittest.TestCase):
         import time
         from boss.loop.state import LoopState, LoopAttempt, AttemptCommand, save_loop_state, load_loop_state
 
-        state = LoopState(
-            loop_id="test-loop-001",
-            session_id="sess-001",
-            task_description="Fix the bug",
-            budget={"max_attempts": 3, "max_commands": 10, "max_wall_seconds": 60.0},
-            execution_style="iterative",
-            started_at=time.time(),
-            current_attempt=1,
-            total_commands=2,
-            total_test_failures=1,
-            attempts=[
-                LoopAttempt(
-                    attempt_number=1,
+        with tempfile.TemporaryDirectory() as td:
+            with override_settings(app_data_dir=Path(td)):
+                state = LoopState(
+                    loop_id="test-loop-001",
+                    session_id="sess-001",
+                    task_description="Fix the bug",
+                    budget={"max_attempts": 3, "max_commands": 10, "max_wall_seconds": 60.0},
+                    execution_style="iterative",
                     started_at=time.time(),
-                    finished_at=time.time(),
-                    phase="edit",
-                    commands=[
-                        AttemptCommand(
-                            command="python test.py",
-                            exit_code=1,
-                            stdout_tail="FAILED",
-                            stderr_tail="",
-                            verdict="allowed",
-                            timestamp=time.time(),
+                    current_attempt=1,
+                    total_commands=2,
+                    total_test_failures=1,
+                    attempts=[
+                        LoopAttempt(
+                            attempt_number=1,
+                            started_at=time.time(),
+                            finished_at=time.time(),
+                            phase="edit",
+                            commands=[
+                                AttemptCommand(
+                                    command="python test.py",
+                                    exit_code=1,
+                                    stdout_tail="FAILED",
+                                    stderr_tail="",
+                                    verdict="allowed",
+                                    timestamp=time.time(),
+                                )
+                            ],
+                            test_passed=False,
+                            test_output_tail="1 failed",
                         )
                     ],
-                    test_passed=False,
-                    test_output_tail="1 failed",
+                    stop_reason=None,
+                    micro_plan=["edit foo.py", "run tests"],
                 )
-            ],
-            stop_reason=None,
-            micro_plan=["edit foo.py", "run tests"],
-        )
 
-        path = save_loop_state(state)
-        self.assertTrue(path.exists())
+                path = save_loop_state(state)
+                self.assertTrue(path.exists())
 
-        loaded = load_loop_state("test-loop-001")
-        self.assertIsNotNone(loaded)
-        self.assertEqual(loaded.loop_id, "test-loop-001")
-        self.assertEqual(loaded.task_description, "Fix the bug")
-        self.assertEqual(loaded.current_attempt, 1)
-        self.assertEqual(loaded.total_test_failures, 1)
-        self.assertEqual(len(loaded.attempts), 1)
-        self.assertEqual(loaded.attempts[0].commands[0].command, "python test.py")
-        self.assertEqual(loaded.micro_plan, ["edit foo.py", "run tests"])
-
-        # Clean up
-        path.unlink(missing_ok=True)
+                loaded = load_loop_state("test-loop-001")
+                self.assertIsNotNone(loaded)
+                self.assertEqual(loaded.loop_id, "test-loop-001")
+                self.assertEqual(loaded.task_description, "Fix the bug")
+                self.assertEqual(loaded.current_attempt, 1)
+                self.assertEqual(loaded.total_test_failures, 1)
+                self.assertEqual(len(loaded.attempts), 1)
+                self.assertEqual(loaded.attempts[0].commands[0].command, "python test.py")
+                self.assertEqual(loaded.micro_plan, ["edit foo.py", "run tests"])
 
     def test_load_nonexistent(self):
         from boss.loop.state import load_loop_state
-        self.assertIsNone(load_loop_state("does-not-exist-xyz"))
+        with tempfile.TemporaryDirectory() as td:
+            with override_settings(app_data_dir=Path(td)):
+                self.assertIsNone(load_loop_state("does-not-exist-xyz"))
 
 
 class TestLoopBudgetExhaustion(unittest.TestCase):

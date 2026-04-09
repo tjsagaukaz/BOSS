@@ -27,6 +27,11 @@ from boss.tools.intelligence import (
     search_code_semantic,
     search_code_symbolic,
 )
+from boss.tools.ios import (
+    inspect_xcode_project,
+    list_xcode_schemes,
+    summarize_ios_project,
+)
 from boss.tools.memory import (
     get_project_details,
     list_known_projects,
@@ -130,12 +135,14 @@ def build_entry_agent(
     general_tools = _filter_tools(
         [remember, recall, list_known_projects, get_project_details, search_project_content, memory_stats,
          find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
+         inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
          start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
         policy=policy,
     )
     code_tools = _filter_tools(
         [recall, list_known_projects, get_project_details, search_project_content,
          find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
+         inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
          start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
         policy=policy,
     )

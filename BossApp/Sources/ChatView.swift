@@ -428,7 +428,7 @@ struct MessageView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
             switch message.role {
             case .user:
                 userMessage
@@ -440,6 +440,7 @@ struct MessageView: View {
                 EmptyView()
             }
         }
+        .frame(maxWidth: .infinity)
         .padding(.top, topSpacing)
         .opacity(appeared ? 1 : 0)
         .onAppear {
@@ -448,42 +449,43 @@ struct MessageView: View {
         }
     }
 
-    // MARK: - User Message (left-rail aligned, subtle container)
+    // MARK: - User Message (right-aligned, high-contrast)
 
     private var userMessage: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !message.attachments.isEmpty {
-                attachmentWrap(message.attachments, removable: false)
-            }
+        HStack {
+            Spacer(minLength: 60)
 
-            if !message.content.isEmpty {
-                Text(message.content)
-                    .font(.system(size: CGFloat(fontSize)))
-                    .tracking(Typo.tracking)
-                    .lineSpacing(Typo.lineGap)
-                    .foregroundColor(Typo.primaryText)
-                    .textSelection(.enabled)
-            }
-        }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.white.opacity(0.025))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.04), lineWidth: 1)
-            )
-            .frame(maxWidth: 640, alignment: .leading)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("You: \(message.content)")
-            .contextMenu { messageContextMenu }
-            .onTapGesture(count: 2) {
-                if isLastUserMessage && !vm.isLoading {
-                    vm.editLastUserMessage()
+            VStack(alignment: .leading, spacing: 10) {
+                if !message.attachments.isEmpty {
+                    attachmentWrap(message.attachments, removable: false)
+                }
+
+                if !message.content.isEmpty {
+                    Text(message.content)
+                        .font(.system(size: CGFloat(fontSize), weight: .medium))
+                        .tracking(Typo.tracking)
+                        .lineSpacing(Typo.lineGap)
+                        .foregroundColor(Color.black.opacity(0.9))
+                        .textSelection(.enabled)
                 }
             }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white.opacity(0.95))
+                    .shadow(color: Color.white.opacity(0.15), radius: 12, x: 0, y: 4)
+            )
+        }
+        .frame(maxWidth: 640, alignment: .trailing)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("You: \(message.content)")
+        .contextMenu { messageContextMenu }
+        .onTapGesture(count: 2) {
+            if isLastUserMessage && !vm.isLoading {
+                vm.editLastUserMessage()
+            }
+        }
     }
 
     private func attachmentWrap(_ attachments: [AttachmentItem], removable: Bool) -> some View {
@@ -594,51 +596,67 @@ struct MessageView: View {
     // MARK: - Execution Narrative
 
     private func executionStepView(_ step: ExecutionStep) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(primaryLine(for: step))
-                .font(.system(size: 13))
-                .foregroundColor(step.state == .success ? Typo.tertiaryText : Typo.secondaryText)
-                .contentTransition(.opacity)
+        HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 1)
+                .fill(step.state == .failure ? Color.red.opacity(0.5) : Color.white.opacity(0.12))
+                .frame(width: 3)
 
-            if let statusLine = secondaryLine(for: step) {
-                HStack(spacing: 8) {
-                    Text(statusLine)
-                        .font(.system(size: 12))
-                        .foregroundColor(Typo.tertiaryText)
-                        .contentTransition(.opacity)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(primaryLine(for: step))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(step.state == .success ? Typo.tertiaryText : Typo.secondaryText)
+                    .lineLimit(2)
+                    .contentTransition(.opacity)
 
-                    if step.state == .failure {
-                        Button(action: { vm.retryLastMessage() }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 10, weight: .medium))
-                                Text("Retry")
-                                    .font(.system(size: 11, weight: .medium))
+                if let statusLine = secondaryLine(for: step) {
+                    HStack(spacing: 8) {
+                        Text(statusLine)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(Typo.tertiaryText)
+                            .lineLimit(1)
+                            .contentTransition(.opacity)
+
+                        if step.state == .failure {
+                            Button(action: { vm.retryLastMessage() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.clockwise")
+                                        .font(.system(size: 10, weight: .medium))
+                                    Text("Retry")
+                                        .font(.system(size: 11, weight: .medium))
+                                }
+                                .foregroundColor(Color.white.opacity(0.6))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    Capsule()
+                                        .fill(Color.white.opacity(0.06))
+                                )
                             }
-                            .foregroundColor(Color.white.opacity(0.6))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule()
-                                    .fill(Color.white.opacity(0.06))
-                            )
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Retry last message")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Retry last message")
                     }
                 }
-            }
 
-            if let request = step.permissionRequest, step.state == .waitingPermission {
-                PulsingPermissionView {
-                    PermissionPromptView(request: request) { decision in
-                        vm.respondToPermission(messageId: message.id, request: request, decision: decision)
+                if let request = step.permissionRequest, step.state == .waitingPermission {
+                    PulsingPermissionView {
+                        PermissionPromptView(request: request) { decision in
+                            vm.respondToPermission(messageId: message.id, request: request, decision: decision)
+                        }
                     }
+                    .padding(.top, 4)
                 }
-                .padding(.top, 4)
             }
+            .padding(.leading, 10)
+            .padding(.vertical, 6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.white.opacity(0.03))
+        )
         .animation(.easeOut(duration: 0.12), value: step.state)
     }
 

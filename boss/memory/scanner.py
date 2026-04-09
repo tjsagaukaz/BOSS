@@ -35,6 +35,17 @@ _PROJECT_MARKERS: dict[str, str] = {
     "Dockerfile": "docker",
 }
 
+# File names that signal an Apple/Xcode project root when found
+# (the .xcodeproj directory itself is detected separately)
+_APPLE_PROJECT_MARKERS = {".xcodeproj", ".xcworkspace"}
+
+# Files inside .xcodeproj/.xcworkspace that are worth indexing
+_APPLE_KEY_FILES = {
+    "project.pbxproj",
+    "contents.xcworkspacedata",
+}
+_APPLE_KEY_EXTENSIONS = {".xcscheme", ".entitlements", ".plist"}
+
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -63,8 +74,12 @@ _SKIP_DIRS = {
     ".ruff_cache",
     ".idea",
     ".cache",
+    # Xcode internal directories — key files are harvested explicitly
+    "xcuserdata",
+    "xcshareddata",
+    "project.xcworkspace",
 }
-_SKIP_DIR_SUFFIXES = {".egg-info", ".xcworkspace", ".xcodeproj"}
+_SKIP_DIR_SUFFIXES = {".egg-info"}
 _ALLOWED_HIDDEN_DIRS = {".github", ".vscode", ".devcontainer"}
 _BINARY_EXTENSIONS = {
     ".a",
@@ -147,11 +162,26 @@ def _detect_project_type(project_path: Path) -> str:
     for marker, ptype in _PROJECT_MARKERS.items():
         if (project_path / marker).exists():
             return ptype
+    # Check for .xcodeproj directories
+    try:
+        if any(entry.suffix == ".xcodeproj" for entry in project_path.iterdir() if entry.is_dir()):
+            return "swift"
+    except OSError:
+        pass
     return "unknown"
 
 
 def _is_project_root(path: Path) -> bool:
-    return (path / ".git").exists() or any((path / marker).exists() for marker in _PROJECT_MARKERS)
+    if (path / ".git").exists():
+        return True
+    if any((path / marker).exists() for marker in _PROJECT_MARKERS):
+        return True
+    try:
+        if any(entry.suffix in _APPLE_PROJECT_MARKERS for entry in path.iterdir() if entry.is_dir()):
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def _should_skip_dir(name: str, *, allow_boss_control_dir: bool = False) -> bool:
@@ -261,12 +291,53 @@ def _get_git_info(project_path: Path) -> tuple[str | None, str | None]:
     return remote, branch
 
 
+def _collect_apple_project_files(project_path: Path) -> list[Path]:
+    """Harvest key files from .xcodeproj and .xcworkspace bundles.
+
+    The general walker skips these directories' internals, so we
+    explicitly resolve the small set of files that matter for project
+    intelligence: project.pbxproj, xcscheme files, and workspace data.
+    """
+    results: list[Path] = []
+    try:
+        entries = list(project_path.iterdir())
+    except OSError:
+        return results
+
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        if entry.suffix not in _APPLE_PROJECT_MARKERS:
+            continue
+        # Walk the bundle looking for key files, max 3 levels deep
+        for root, _dirs, files in os.walk(entry, topdown=True, followlinks=False):
+            depth = len(Path(root).relative_to(entry).parts)
+            if depth > 3:
+                continue
+            for fname in files:
+                fpath = Path(root) / fname
+                if fname in _APPLE_KEY_FILES or fpath.suffix in _APPLE_KEY_EXTENSIONS:
+                    # Skip files that are too large (e.g. giant pbxproj in monorepos)
+                    try:
+                        if fpath.stat().st_size > settings.project_scan_max_file_bytes:
+                            continue
+                    except OSError:
+                        continue
+                    results.append(fpath)
+    return results
+
+
 def _walk_project_files(project_path: Path) -> tuple[list[Path], int, bool]:
     candidates: list[Path] = []
     seen = 0
     truncated = False
     control = load_boss_control(project_path)
     include_boss_control_files = bool(control.config.indexing.get("include_boss_control_files", False))
+
+    # Harvest key files from Apple project bundles first
+    apple_files = _collect_apple_project_files(project_path)
+    candidates.extend(apple_files)
+    seen += len(apple_files)
 
     for root, dirnames, filenames in os.walk(project_path, topdown=True, followlinks=False):
         dirnames[:] = [
@@ -401,6 +472,30 @@ def _infer_stack(project_path: Path, project_type: str, relative_paths: list[Pat
     if any("react" in sample for sample in samples):
         add("React")
 
+    # Detect Xcode / iOS / macOS project
+    has_xcodeproj = any(p.endswith(".xcodeproj/project.pbxproj") or p.endswith(".pbxproj") for p in path_strings)
+    has_info_plist = any(p.endswith("Info.plist") for p in path_strings)
+    if has_xcodeproj or has_info_plist:
+        add("Xcode")
+    if has_xcodeproj:
+        # Peek into pbxproj for platform hints
+        for p in path_strings:
+            if p.endswith("project.pbxproj"):
+                _pbx_path = project_path / p
+                try:
+                    _pbx_head = _pbx_path.read_text(encoding="utf-8", errors="replace")[:8000].lower()
+                    if "iphoneos" in _pbx_head or "iphone" in _pbx_head:
+                        add("iOS")
+                    if "macosx" in _pbx_head or "macos" in _pbx_head:
+                        add("macOS")
+                    if "watchos" in _pbx_head:
+                        add("watchOS")
+                    if "appletvos" in _pbx_head or "tvos" in _pbx_head:
+                        add("tvOS")
+                except OSError:
+                    pass
+                break
+
     return stack
 
 
@@ -492,6 +587,12 @@ def _useful_commands(project_path: Path, relative_paths: list[Path], project_typ
             package_dir = Path(rel).parent.as_posix()
             for script in _package_scripts(project_path / rel)[:3]:
                 add(f"cd {package_dir} && npm run {script}")
+
+    # Xcode / iOS project commands
+    has_xcodeproj = any(r.endswith(".xcodeproj/project.pbxproj") or r.endswith(".pbxproj") for r in rel_set)
+    if has_xcodeproj:
+        add("xcodebuild -list")
+        add("xcodebuild -showBuildSettings")
 
     if project_type == "python" and not commands:
         add("python -m <package>.main")
@@ -589,7 +690,23 @@ def _build_project_metadata(
         metadata["git_remote"] = git_remote
     if git_branch:
         metadata["git_branch"] = git_branch
+
+    # Include Apple project intelligence when applicable
+    _attach_apple_project_metadata(project_path, metadata)
+
     return metadata
+
+
+def _attach_apple_project_metadata(project_path: Path, metadata: dict[str, Any]) -> None:
+    """If this looks like an Apple/Xcode project, attach structured intelligence."""
+    try:
+        from boss.intelligence.xcode import inspect_xcode_project
+        info = inspect_xcode_project(project_path)
+        # Only attach when we actually found something meaningful
+        if info.targets or info.schemes or info.xcodeproj_path or info.xcworkspace_path:
+            metadata["apple_project"] = info.to_dict()
+    except Exception:
+        pass
 
 
 def _project_summary_signature(

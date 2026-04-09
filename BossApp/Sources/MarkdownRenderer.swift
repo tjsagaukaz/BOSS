@@ -489,9 +489,11 @@ struct InlineTextView: View {
         case .boldItalic(let str):
             return Text(str).bold().italic()
         case .code(let str):
-            return Text(str)
-                .font(.system(size: MDTypo.bodySize - 1, design: .monospaced))
-                .foregroundColor(Color(red: 0.92, green: 0.58, blue: 0.46))
+            var attr = AttributedString(" \(str) ")
+            attr.font = .system(size: MDTypo.bodySize - 1, design: .monospaced)
+            attr.foregroundColor = Color.white.opacity(0.85)
+            attr.backgroundColor = Color.white.opacity(0.08)
+            return Text(attr)
         case .link(let text, let url):
             var attrStr = AttributedString(text)
             attrStr.foregroundColor = .init(red: 0.4, green: 0.7, blue: 1.0)
@@ -562,9 +564,9 @@ private struct MarkdownNodeView: View {
 
         return InlineTextView(text).textContent
             .font(.system(size: style.0, weight: style.1))
-            .tracking(-0.2)
+            .tracking(-0.5)
             .foregroundColor(MDTypo.primaryText)
-            .padding(.top, level <= 2 ? 6 : 2)
+            .padding(.top, level == 1 ? 24 : level == 2 ? 20 : 12)
             .textSelection(.enabled)
     }
 
@@ -651,10 +653,11 @@ private struct MarkdownNodeView: View {
                             .foregroundColor(MDTypo.tertiaryText)
                             .frame(width: 24, alignment: .trailing)
                     } else {
-                        Text("•")
-                            .font(.system(size: MDTypo.bodySize + 1))
-                            .foregroundColor(MDTypo.tertiaryText)
-                            .frame(width: 16, alignment: .center)
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 4))
+                            .foregroundColor(Color.white.opacity(0.25))
+                            .frame(width: 14, alignment: .center)
+                            .offset(y: 6)
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
@@ -665,7 +668,7 @@ private struct MarkdownNodeView: View {
                 }
             }
         }
-        .padding(.leading, 4)
+        .padding(.leading, 2)
     }
 
     private func checkboxState(in nodes: [MarkdownNode]) -> Bool? {
