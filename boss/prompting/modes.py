@@ -121,6 +121,24 @@ def general_tool_hints(tool_names: set[str]) -> str:
         lines.append(
             "- 'project_graph': structural overview of a project's code"
         )
+    if "start_ios_delivery" in tool_names:
+        lines.append(
+            "- 'inspect_xcode_project' / 'list_xcode_schemes' / "
+            "'summarize_ios_project': inspect iOS/Xcode project structure"
+        )
+        lines.append(
+            "- 'start_ios_delivery': create and start an iOS build/export/"
+            "upload pipeline (requires approval)"
+        )
+        lines.append(
+            "- 'ios_delivery_status': check progress of delivery runs"
+        )
+    elif "inspect_xcode_project" in tool_names:
+        lines.append(
+            "- 'inspect_xcode_project' / 'list_xcode_schemes' / "
+            "'summarize_ios_project': inspect iOS/Xcode project structure "
+            "(read-only in this mode)"
+        )
     return "\n".join(lines)
 
 

@@ -80,6 +80,9 @@ echo "-- Backend regression harness"
 echo "-- Full test suite"
 "$PYTHON" -m unittest discover -s "$ROOT/tests" -v
 
+echo "-- iOS delivery tests"
+"$PYTHON" -m unittest discover -s "$ROOT/tests" -p 'test_ios_delivery.py' -v
+
 echo "-- Local doctor"
 "$PYTHON" "$ROOT/scripts/dev_doctor.py"
 

@@ -541,6 +541,69 @@ final class APIClient: Sendable {
         return try decode(DeploymentInfo.self, from: data, context: "/api/deploy/deployments/\(deploymentId)/cancel")
     }
 
+    // MARK: - iOS Delivery
+
+    func fetchIOSDeliveryStatus() async throws -> IOSDeliveryStatusInfo {
+        let data = try await get("/api/ios-delivery/status")
+        return try decode(IOSDeliveryStatusInfo.self, from: data, context: "/api/ios-delivery/status")
+    }
+
+    func fetchIOSDeliveryRuns(limit: Int = 50) async throws -> [IOSDeliveryRunInfo] {
+        let data = try await get("/api/ios-delivery/runs", queryItems: [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ])
+        return try decode([IOSDeliveryRunInfo].self, from: data, context: "/api/ios-delivery/runs")
+    }
+
+    func fetchIOSDeliveryRun(runId: String) async throws -> IOSDeliveryRunInfo {
+        let data = try await get("/api/ios-delivery/runs/\(runId)")
+        return try decode(IOSDeliveryRunInfo.self, from: data, context: "/api/ios-delivery/runs/\(runId)")
+    }
+
+    func fetchIOSDeliveryRunEvents(runId: String) async throws -> [IOSDeliveryEventInfo] {
+        let data = try await get("/api/ios-delivery/runs/\(runId)/events")
+        return try decode([IOSDeliveryEventInfo].self, from: data, context: "/api/ios-delivery/runs/\(runId)/events")
+    }
+
+    func createIOSDeliveryRun(
+        projectPath: String,
+        scheme: String? = nil,
+        configuration: String = "Release",
+        exportMethod: String = "app-store",
+        uploadTarget: String = "none"
+    ) async throws -> IOSDeliveryRunInfo {
+        var body: [String: Any] = [
+            "project_path": projectPath,
+            "configuration": configuration,
+            "export_method": exportMethod,
+            "upload_target": uploadTarget,
+        ]
+        if let scheme { body["scheme"] = scheme }
+        let jsonData = try JSONSerialization.data(withJSONObject: body)
+        let data = try await post("/api/ios-delivery/runs", body: jsonData)
+        return try decode(IOSDeliveryRunInfo.self, from: data, context: "/api/ios-delivery/runs (create)")
+    }
+
+    func startIOSDeliveryRun(runId: String) async throws -> IOSDeliveryRunInfo {
+        let data = try await post("/api/ios-delivery/runs/\(runId)/start", body: nil)
+        return try decode(IOSDeliveryRunInfo.self, from: data, context: "/api/ios-delivery/runs/\(runId)/start")
+    }
+
+    func cancelIOSDeliveryRun(runId: String) async throws -> IOSDeliveryRunInfo {
+        let data = try await post("/api/ios-delivery/runs/\(runId)/cancel", body: nil)
+        return try decode(IOSDeliveryRunInfo.self, from: data, context: "/api/ios-delivery/runs/\(runId)/cancel")
+    }
+
+    func triggerIOSDeliveryUpload(runId: String) async throws -> IOSDeliveryRunInfo {
+        let data = try await post("/api/ios-delivery/runs/\(runId)/upload", body: nil)
+        return try decode(IOSDeliveryRunInfo.self, from: data, context: "/api/ios-delivery/runs/\(runId)/upload")
+    }
+
+    func fetchIOSDeliveryUploadStatus(runId: String) async throws -> UploadProcessingInfo {
+        let data = try await get("/api/ios-delivery/runs/\(runId)/upload-status")
+        return try decode(UploadProcessingInfo.self, from: data, context: "/api/ios-delivery/runs/\(runId)/upload-status")
+    }
+
     // MARK: - HTTP helpers
 
     private func get(_ path: String, queryItems: [URLQueryItem] = []) async throws -> Data {

@@ -1,10 +1,15 @@
-"""iOS / Xcode project intelligence tools — let agents inspect Apple project structure."""
+"""iOS / Xcode project intelligence and delivery tools.
+
+Read-only tools let agents inspect Apple project structure.
+Delivery tools let agents create and start iOS delivery pipeline runs
+through the governed tool system.
+"""
 
 from __future__ import annotations
 
 import json
 
-from boss.execution import ExecutionType, governed_function_tool, scope_value
+from boss.execution import ExecutionType, display_value, governed_function_tool, scope_value
 
 
 @governed_function_tool(
@@ -148,5 +153,193 @@ def summarize_ios_project(project_path: str) -> str:
 
     if info.errors:
         lines.append(f"\nWarnings: {'; '.join(info.errors)}")
+
+    return "\n".join(lines)
+
+
+# ── Delivery pipeline tools ─────────────────────────────────────────
+
+
+@governed_function_tool(
+    execution_type=ExecutionType.RUN,
+    title="Start iOS Delivery",
+    describe_call=lambda params: (
+        f'Start iOS delivery pipeline for {params.get("project_path", "project")}'
+        + (f' scheme={params.get("scheme")}' if params.get("scheme") else "")
+        + (f' → {params.get("upload_target")}' if params.get("upload_target", "none") != "none" else "")
+    ),
+    scope_key=lambda params: scope_value("ios-delivery", "run"),
+    scope_label=lambda params: display_value(
+        params.get("project_path"), fallback="iOS delivery run"
+    ),
+)
+def start_ios_delivery(
+    project_path: str,
+    scheme: str = "",
+    configuration: str = "Release",
+    export_method: str = "app-store",
+    upload_target: str = "none",
+) -> str:
+    """Create and start an iOS delivery pipeline run.
+
+    The pipeline runs: inspect → archive → export → optional upload.
+    Archive and export execute xcodebuild through governed subprocess
+    execution. Upload uses fastlane pilot or xcrun altool with App
+    Store Connect API key authentication.
+
+    The run executes in the background. Use ios_delivery_status to
+    check progress.
+
+    Args:
+        project_path: Path to the directory containing the Xcode project.
+        scheme: Build scheme. Auto-detected if empty.
+        configuration: Build configuration (Release or Debug).
+        export_method: Export method (app-store, ad-hoc, development, enterprise).
+        upload_target: Upload destination (none, testflight, app-store-connect).
+    """
+    import contextvars
+    import threading
+
+    from boss.ios_delivery.engine import create_run, run_full_pipeline
+    from boss.runner.engine import _current_runner_var, get_runner
+
+    # Apply the same validation the API endpoint uses — reject blank paths.
+    project_path = project_path.strip()
+    if not project_path:
+        return "Cannot create delivery run: project_path is required"
+
+    try:
+        run = create_run(
+            project_path=project_path,
+            scheme=scheme or None,
+            configuration=configuration,
+            export_method=export_method,
+            upload_target=upload_target,
+        )
+    except ValueError as exc:
+        return f"Cannot create delivery run: {exc}"
+
+    # Establish runner governance for the background thread, then restore
+    # the caller's runner so this tool doesn't leave the context elevated.
+    prev_runner = _current_runner_var.get(None)
+    get_runner(mode="deploy", workspace_root=project_path)
+    ctx = contextvars.copy_context()
+    _current_runner_var.set(prev_runner)
+
+    def _run_pipeline() -> None:
+        try:
+            run_full_pipeline(run)
+        except Exception:
+            import logging
+            logging.getLogger("boss.tools.ios").exception(
+                "Pipeline execution failed for run %s", run.run_id
+            )
+
+    threading.Thread(
+        target=ctx.run, args=(_run_pipeline,),
+        daemon=True, name=f"ios-delivery-{run.run_id}",
+    ).start()
+
+    parts = [f"iOS delivery run started: {run.run_id}"]
+    parts.append(f"Project: {project_path}")
+    if run.scheme:
+        parts.append(f"Scheme: {run.scheme}")
+    parts.append(f"Configuration: {configuration}")
+    parts.append(f"Export method: {export_method}")
+    if upload_target != "none":
+        parts.append(f"Upload target: {upload_target}")
+    parts.append("")
+    parts.append("The pipeline is running in the background (inspect → archive → export"
+                  + (" → upload" if upload_target != "none" else "") + ").")
+    parts.append("Use ios_delivery_status to check progress.")
+    return "\n".join(parts)
+
+
+@governed_function_tool(
+    execution_type=ExecutionType.READ,
+    title="iOS Delivery Status",
+    describe_call=lambda _params: "Check iOS delivery pipeline status",
+    scope_key=lambda _params: scope_value("ios-delivery", "status"),
+    scope_label=lambda _params: "iOS delivery status",
+)
+def ios_delivery_status(run_id: str = "") -> str:
+    """Check the status of iOS delivery pipeline runs.
+
+    Without a run_id, returns an overview of all active and recent runs.
+    With a run_id, returns detailed status for that specific run.
+    If the run is in an upload-processing state, this also triggers the
+    same status-transition check the UI uses, so processing→ready
+    transitions are observed.
+
+    Args:
+        run_id: Optional run ID for detailed status. Empty for overview.
+    """
+    if run_id:
+        from boss.ios_delivery.state import load_run
+
+        run = load_run(run_id)
+        if run is None:
+            return f"No delivery run found with ID: {run_id}"
+
+        # Drive the same upload status-transition check the UI uses.
+        # Without this, the agent would only see stale persisted state
+        # and never observe processing → ready.
+        # Only check when already "processing" — polling during "uploading"
+        # would prematurely mutate altool runs to processing.
+        if run.upload_status == "processing":
+            from boss.ios_delivery.upload import check_processing_status
+
+            processing_result = check_processing_status(run)
+            # Reload in case check_processing_status persisted a transition
+            reloaded = load_run(run_id)
+            if reloaded is not None:
+                run = reloaded
+
+        lines = [f"Run {run.run_id}"]
+        lines.append(f"Phase: {run.phase}")
+        lines.append(f"Project: {run.project_path}")
+        if run.scheme:
+            lines.append(f"Scheme: {run.scheme}")
+        lines.append(f"Configuration: {run.configuration}")
+        if run.bundle_identifier:
+            lines.append(f"Bundle ID: {run.bundle_identifier}")
+        if run.archive_path:
+            lines.append(f"Archive: {run.archive_path}")
+        if run.ipa_path:
+            lines.append(f"IPA: {run.ipa_path}")
+        if run.upload_target != "none":
+            lines.append(f"Upload target: {run.upload_target}")
+            lines.append(f"Upload status: {run.upload_status}")
+            if run.upload_method != "none":
+                lines.append(f"Upload method: {run.upload_method}")
+        if run.error:
+            lines.append(f"Error: {run.error}")
+        return "\n".join(lines)
+
+    from boss.ios_delivery.engine import delivery_status
+
+    status = delivery_status()
+    active = status["active_runs"]
+    recent = status["recent_completed"]
+    signing = status["signing"]
+
+    lines = ["iOS Delivery Status"]
+    lines.append(f"Total runs: {status['total_runs']}")
+    lines.append(f"Signing: can_sign={signing.get('can_sign', False)}, "
+                 f"can_upload={signing.get('can_upload', False)}")
+
+    if active:
+        lines.append(f"\nActive runs ({len(active)}):")
+        for r in active:
+            label = r.get("scheme") or r.get("project_path", "?").rsplit("/", 1)[-1]
+            lines.append(f"  [{r['phase']}] {label} — {r['run_id'][:12]}")
+    else:
+        lines.append("\nNo active runs.")
+
+    if recent:
+        lines.append(f"\nRecent completed ({len(recent)}):")
+        for r in recent[:5]:
+            label = r.get("scheme") or r.get("project_path", "?").rsplit("/", 1)[-1]
+            lines.append(f"  [{r['phase']}] {label} — {r['run_id'][:12]}")
 
     return "\n".join(lines)

@@ -2942,6 +2942,56 @@ async def ios_delivery_cancel_run(run_id: str):
     return run.to_dict()
 
 
+@app.post("/api/ios-delivery/runs/{run_id}/start")
+async def ios_delivery_start_run(run_id: str):
+    """Start executing the delivery pipeline for a pending run.
+
+    The pipeline (inspect → archive → export → optional upload) runs on a
+    background thread because xcodebuild can take minutes.  The endpoint
+    returns the run immediately so the client can poll progress.
+    """
+    import contextvars
+    import threading
+
+    from boss.ios_delivery.engine import run_full_pipeline
+    from boss.ios_delivery.state import DeliveryPhase, load_run
+    from boss.runner.engine import get_runner
+
+    run = load_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="iOS delivery run not found")
+    if run.phase != DeliveryPhase.PENDING.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run is in phase '{run.phase}', expected 'pending'",
+        )
+
+    # Establish runner context in the request thread so it can be
+    # propagated to the background thread via copy_context().
+    get_runner(mode="deploy", workspace_root=run.project_path)
+
+    # copy_context() snapshots all ContextVars (including the runner)
+    # so that run_full_pipeline sees the governed runner on the child thread.
+    ctx = contextvars.copy_context()
+
+    def _run_pipeline() -> None:
+        try:
+            run_full_pipeline(run)
+        except Exception:
+            import logging
+
+            logging.getLogger("boss.api").exception(
+                "Pipeline execution failed for run %s", run_id
+            )
+
+    threading.Thread(
+        target=ctx.run, args=(_run_pipeline,),
+        daemon=True, name=f"ios-delivery-{run_id}",
+    ).start()
+
+    return run.to_dict()
+
+
 @app.post("/api/ios-delivery/runs/{run_id}/upload")
 async def ios_delivery_start_upload(run_id: str):
     """Trigger upload of a completed export to TestFlight / App Store Connect.

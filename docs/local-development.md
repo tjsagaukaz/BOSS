@@ -98,4 +98,8 @@ The release check will:
 - The doctor and smoke scripts are local-only and do not add hosted telemetry.
 - Startup will report stale or mismatched lock/process state clearly, but it will not kill any process automatically.
 - The app will try to start the local backend automatically when it can locate the workspace and `.venv` runtime. If a different server is already bound to `127.0.0.1:8321`, the app will warn instead of killing it.
+
+## iOS Delivery
+
+For archiving, exporting, and uploading iOS apps to TestFlight, see [docs/ios-delivery.md](ios-delivery.md). The dev doctor now checks for Xcode toolchain prerequisites and signing configuration as part of its standard run.
 - Boss-native control files live in `BOSS.md`, `.boss/config.toml`, `.boss/review.md`, and `.boss/rules/*.md`. Keep those current before trusting a review or background run.

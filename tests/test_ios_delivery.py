@@ -2776,5 +2776,1020 @@ class TestUploadIntegrityFixes(unittest.TestCase):
         self.assertTrue(run.is_terminal)
 
 
+class TestStartEndpointContract(unittest.TestCase):
+    """Verify the /start endpoint exists and has correct governance."""
+
+    def test_start_endpoint_exists_in_api(self):
+        """POST /api/ios-delivery/runs/{run_id}/start must exist."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        tree = ast.parse(src.read_text())
+        found = False
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_run":
+                    found = True
+                    break
+        self.assertTrue(found, "ios_delivery_start_run function not found in api.py")
+
+    def test_start_endpoint_calls_get_runner_before_pipeline(self):
+        """Start endpoint must establish runner context before spawning thread."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        tree = ast.parse(src.read_text())
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_run":
+                    func = node
+                    break
+        self.assertIsNotNone(func)
+        src_text = src.read_text()
+        func_src = ast.get_source_segment(src_text, func) or ""
+        self.assertIn('mode="deploy"', func_src,
+                      "start endpoint must use deploy mode")
+        self.assertIn("get_runner", func_src,
+                      "start endpoint must call get_runner")
+        # get_runner must appear before Thread.start
+        gr_pos = func_src.index("get_runner")
+        thread_pos = func_src.index("Thread(")
+        self.assertLess(gr_pos, thread_pos,
+                        "get_runner must be called before spawning thread")
+
+    def test_start_endpoint_rejects_non_pending(self):
+        """Start raises 409 if run is not in pending phase."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        tree = ast.parse(src.read_text())
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_run":
+                    func = node
+                    break
+        self.assertIsNotNone(func)
+        src_text = src.read_text()
+        func_src = ast.get_source_segment(src_text, func) or ""
+        self.assertIn("409", func_src,
+                      "start endpoint must return 409 for non-pending runs")
+        self.assertIn("PENDING", func_src,
+                      "start endpoint must check for PENDING phase")
+
+    def test_start_endpoint_runs_full_pipeline_on_thread(self):
+        """Start endpoint must spawn a daemon thread for run_full_pipeline."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        tree = ast.parse(src.read_text())
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_run":
+                    func = node
+                    break
+        self.assertIsNotNone(func)
+        src_text = src.read_text()
+        func_src = ast.get_source_segment(src_text, func) or ""
+        self.assertIn("run_full_pipeline", func_src,
+                      "start endpoint must call run_full_pipeline")
+        self.assertIn("daemon=True", func_src,
+                      "pipeline thread must be a daemon thread")
+
+    def test_create_run_returns_pending(self):
+        """POST /runs creates a run in PENDING state — does NOT start pipeline."""
+        from boss.ios_delivery.engine import create_run
+        from boss.ios_delivery.state import DeliveryPhase
+
+        with tempfile.TemporaryDirectory() as td:
+            with override_settings(app_data_dir=Path(td)):
+                run = create_run(project_path="/tmp/fake")
+                self.assertEqual(run.phase, DeliveryPhase.PENDING.value)
+                # The run should NOT have progressed past pending
+                self.assertIsNone(run.archive_path)
+                self.assertIsNone(run.ipa_path)
+
+
+class TestStartEndpointGovernance(unittest.TestCase):
+    """Verify the /start endpoint propagates runner context to the pipeline thread."""
+
+    def test_context_propagated_via_copy_context(self):
+        """Start endpoint must use contextvars.copy_context() to propagate runner."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        tree = ast.parse(src.read_text())
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_run":
+                    func = node
+                    break
+        self.assertIsNotNone(func, "ios_delivery_start_run not found")
+        src_text = src.read_text()
+        func_src = ast.get_source_segment(src_text, func) or ""
+        self.assertIn("copy_context", func_src,
+                      "start endpoint must use copy_context() to propagate runner")
+        self.assertIn("ctx.run", func_src,
+                      "background thread must run under ctx.run()")
+
+    def test_thread_target_is_ctx_run(self):
+        """Thread target must be ctx.run, not the bare _run_pipeline."""
+        import ast
+        src = Path(__file__).resolve().parent.parent / "boss" / "api.py"
+        src_text = src.read_text()
+        tree = ast.parse(src_text)
+        func = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name == "ios_delivery_start_run":
+                    func = node
+                    break
+        self.assertIsNotNone(func)
+        func_src = ast.get_source_segment(src_text, func) or ""
+        # The Thread must use target=ctx.run with args=(_run_pipeline,)
+        self.assertIn("target=ctx.run", func_src,
+                      "Thread target must be ctx.run, not _run_pipeline directly")
+
+    def test_runner_context_inherits_across_threads(self):
+        """Verify ContextVar propagation works with copy_context().run()."""
+        import contextvars
+        import threading
+
+        from boss.runner.engine import _current_runner_var, get_runner
+
+        # Set up runner in this thread
+        runner = get_runner(mode="deploy", workspace_root="/tmp/fake")
+        ctx = contextvars.copy_context()
+
+        seen_runner = [None]
+
+        def check_runner():
+            from boss.runner.engine import current_runner
+            seen_runner[0] = current_runner()
+
+        t = threading.Thread(target=ctx.run, args=(check_runner,))
+        t.start()
+        t.join(timeout=5)
+
+        self.assertIsNotNone(seen_runner[0],
+                             "Runner must be visible in child thread via copy_context")
+        self.assertIs(seen_runner[0], runner,
+                      "Child thread must see the same runner instance")
+
+    def test_runner_context_lost_without_copy_context(self):
+        """Without copy_context, child thread should NOT see the runner."""
+        import threading
+
+        from boss.runner.engine import get_runner
+
+        get_runner(mode="deploy", workspace_root="/tmp/fake")
+
+        seen_runner = [None]
+
+        def check_runner():
+            from boss.runner.engine import current_runner
+            seen_runner[0] = current_runner()
+
+        t = threading.Thread(target=check_runner)
+        t.start()
+        t.join(timeout=5)
+
+        self.assertIsNone(seen_runner[0],
+                          "Without copy_context, child thread must NOT see runner")
+
+
+class TestUploadStatusPollingGuard(unittest.TestCase):
+    """Verify that upload-status is not polled prematurely."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    def test_check_processing_status_mutates_uploading_to_processing_for_altool(self):
+        """check_processing_status() for altool uploading run returns processing."""
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, new_run_id,
+        )
+        from boss.ios_delivery.upload import UploadMethod, check_processing_status
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.phase = DeliveryPhase.UPLOADING.value
+        run.upload_status = UploadStatus.UPLOADING.value
+        run.upload_method = UploadMethod.XCRUN_ALTOOL.value
+        from boss.ios_delivery.state import save_run
+        save_run(run)
+
+        status = check_processing_status(run)
+        # The server WILL return processing — this is why the client must
+        # NOT call this endpoint while upload_status is still "uploading".
+        self.assertEqual(status.status, UploadStatus.PROCESSING.value)
+
+    def test_check_processing_status_safe_for_processing(self):
+        """check_processing_status() for altool processing run stays processing."""
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, new_run_id,
+        )
+        from boss.ios_delivery.upload import UploadMethod, check_processing_status
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.phase = DeliveryPhase.UPLOADING.value
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.XCRUN_ALTOOL.value
+        from boss.ios_delivery.state import save_run
+        save_run(run)
+
+        status = check_processing_status(run)
+        self.assertEqual(status.status, UploadStatus.PROCESSING.value)
+
+
+# ── Release-gate integration tests ─────────────────────────────────
+
+
+class TestStatusPersistenceRoundTrip(unittest.TestCase):
+    """Verify run state survives save/load/update cycles."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    def test_full_lifecycle_persistence(self):
+        """Run state persists across every phase transition."""
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun,
+            load_run, new_run_id, save_run,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp/test")
+        run.scheme = "MyApp"
+        run.bundle_identifier = "com.test.app"
+        run.team_id = "ABCD1234EF"
+        save_run(run)
+
+        for phase in [DeliveryPhase.INSPECTING, DeliveryPhase.ARCHIVING,
+                      DeliveryPhase.EXPORTING, DeliveryPhase.COMPLETED]:
+            loaded = load_run(run.run_id)
+            self.assertIsNotNone(loaded)
+            loaded.phase = phase.value
+            save_run(loaded)
+
+        final = load_run(run.run_id)
+        self.assertEqual(final.phase, DeliveryPhase.COMPLETED.value)
+        self.assertEqual(final.scheme, "MyApp")
+        self.assertEqual(final.bundle_identifier, "com.test.app")
+        self.assertEqual(final.team_id, "ABCD1234EF")
+
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, UploadMethod, UploadStatus, load_run, new_run_id, save_run,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp/test")
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.FASTLANE_PILOT.value
+        run.upload_id = "upload-abc-123"
+        run.upload_started_at = 1700000000.0
+        save_run(run)
+
+        loaded = load_run(run.run_id)
+        self.assertEqual(loaded.upload_status, UploadStatus.PROCESSING.value)
+        self.assertEqual(loaded.upload_method, UploadMethod.FASTLANE_PILOT.value)
+        self.assertEqual(loaded.upload_id, "upload-abc-123")
+        self.assertEqual(loaded.upload_started_at, 1700000000.0)
+
+    def test_event_log_persists(self):
+        """Events append to JSONL log and are readable."""
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, new_run_id, save_run,
+            append_event, read_events,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp/test")
+        save_run(run)
+
+        append_event(run.run_id, event_type="phase_change", message="inspecting", payload={"phase": "inspecting"})
+        append_event(run.run_id, event_type="phase_change", message="archiving", payload={"phase": "archiving"})
+        append_event(run.run_id, event_type="error", message="build failed", payload={"code": 65})
+
+        events = read_events(run.run_id)
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0]["type"], "phase_change")
+        self.assertEqual(events[2]["type"], "error")
+        self.assertEqual(events[2]["payload"]["code"], 65)
+
+    def test_logs_persist_across_phases(self):
+        """Build, export, and upload logs persist separately."""
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, load_run, new_run_id, save_run,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp/test")
+        run.build_log = "BUILD SUCCEEDED\n"
+        run.export_log = "EXPORT SUCCEEDED\n"
+        run.upload_log = "UPLOAD OK\n"
+        save_run(run)
+
+        loaded = load_run(run.run_id)
+        self.assertEqual(loaded.build_log, "BUILD SUCCEEDED\n")
+        self.assertEqual(loaded.export_log, "EXPORT SUCCEEDED\n")
+        self.assertEqual(loaded.upload_log, "UPLOAD OK\n")
+
+
+class TestToolchainDetectionIntegration(unittest.TestCase):
+    """Test toolchain detection with real system tools."""
+
+    def test_detect_toolchain_returns_valid_struct(self):
+        """detect_toolchain() returns IOSToolchain with populated fields."""
+        from boss.ios_delivery.toolchain import detect_toolchain
+        tc = detect_toolchain()
+        self.assertIsNotNone(tc)
+        self.assertIsInstance(tc.xcodebuild.available, bool)
+        self.assertIsInstance(tc.xcrun.available, bool)
+        self.assertIsInstance(tc.can_build, bool)
+
+    def test_toolchain_to_dict_round_trips(self):
+        """Toolchain serializes to dict with all expected keys."""
+        from boss.ios_delivery.toolchain import detect_toolchain
+        tc = detect_toolchain()
+        d = tc.to_dict()
+        self.assertIn("xcodebuild", d)
+        self.assertIn("xcrun", d)
+        self.assertIn("fastlane", d)
+        self.assertIn("can_build", d)
+        self.assertIn("has_fastlane", d)
+
+    def test_archive_command_structure(self):
+        """Archive command includes required xcodebuild flags."""
+        from boss.ios_delivery.toolchain import build_archive_command
+        cmd = build_archive_command(
+            project="MyApp.xcodeproj",
+            scheme="MyApp",
+            configuration="Release",
+            archive_path="/tmp/MyApp.xcarchive",
+        )
+        self.assertEqual(cmd[0], "xcodebuild")
+        self.assertIn("archive", cmd)
+        self.assertIn("-scheme", cmd)
+        self.assertIn("MyApp", cmd)
+        self.assertIn("-archivePath", cmd)
+        self.assertIn("CODE_SIGN_ALLOW_PROVISIONING_UPDATES=YES", cmd)
+
+    def test_export_command_structure(self):
+        """Export command includes exportArchive with options plist."""
+        from boss.ios_delivery.toolchain import build_export_command
+        cmd = build_export_command(
+            archive_path="/tmp/MyApp.xcarchive",
+            export_path="/tmp/export",
+            export_options_plist="/tmp/ExportOptions.plist",
+        )
+        self.assertEqual(cmd[0], "xcodebuild")
+        self.assertIn("-exportArchive", cmd)
+        self.assertIn("-archivePath", cmd)
+        self.assertIn("-exportPath", cmd)
+        self.assertIn("-exportOptionsPlist", cmd)
+        self.assertIn("-allowProvisioningUpdates", cmd)
+
+    def test_pilot_upload_command_structure(self):
+        """Pilot upload command includes IPA path and API key."""
+        from boss.ios_delivery.toolchain import build_pilot_upload_command
+        cmd = build_pilot_upload_command(
+            ipa_path="/tmp/MyApp.ipa",
+            api_key_path="/tmp/api_key.json",
+        )
+        self.assertEqual(cmd[0], "fastlane")
+        self.assertIn("pilot", cmd)
+        self.assertIn("upload", cmd)
+        self.assertIn("/tmp/MyApp.ipa", cmd)
+        self.assertIn("/tmp/api_key.json", cmd)
+
+    def test_altool_upload_command_structure(self):
+        """Altool upload command includes authentication flags."""
+        from boss.ios_delivery.toolchain import build_altool_upload_command
+        cmd = build_altool_upload_command(
+            ipa_path="/tmp/MyApp.ipa",
+            api_key="KEYID123",
+            api_issuer="ISSUER-UUID",
+            api_key_path="/tmp/keys",
+        )
+        self.assertEqual(cmd[0], "xcrun")
+        self.assertIn("altool", cmd)
+        self.assertIn("--upload-app", cmd)
+        self.assertIn("--apiKey", cmd)
+        self.assertIn("KEYID123", cmd)
+        self.assertIn("--apiIssuer", cmd)
+        self.assertIn("ISSUER-UUID", cmd)
+        self.assertIn("--apiKeyPath", cmd)
+        self.assertIn("/tmp/keys", cmd)
+
+    def test_altool_command_without_key_path(self):
+        """Altool command omits --apiKeyPath when not provided."""
+        from boss.ios_delivery.toolchain import build_altool_upload_command
+        cmd = build_altool_upload_command(
+            ipa_path="/tmp/MyApp.ipa",
+            api_key="KEYID123",
+            api_issuer="ISSUER-UUID",
+        )
+        self.assertNotIn("--apiKeyPath", cmd)
+
+
+class TestMissingToolFailures(unittest.TestCase):
+    """Verify graceful failure when tools or credentials are missing."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    def test_archive_no_toolchain_fails_with_message(self):
+        """Archive fails clearly when xcodebuild is not available."""
+        from boss.ios_delivery.engine import create_run, archive_build
+        from boss.ios_delivery.state import DeliveryPhase
+        from boss.ios_delivery.toolchain import IOSToolchain, ToolInfo
+
+        run = create_run("/tmp/fake", scheme="MyApp")
+        run.xcodeproj_path = "MyApp.xcodeproj"
+        no_tool = ToolInfo(name="n", available=False)
+        fake_tc = IOSToolchain(xcodebuild=no_tool, xcrun=no_tool, fastlane=no_tool, security=no_tool)
+        with patch("boss.ios_delivery.toolchain.get_toolchain", return_value=fake_tc):
+            run = archive_build(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertTrue(run.is_terminal)
+        self.assertIn("xcodebuild", run.error)
+
+    def test_export_no_archive_fails_with_message(self):
+        """Export fails clearly when no archive path exists."""
+        from boss.ios_delivery.engine import create_run, export_archive
+        from boss.ios_delivery.state import DeliveryPhase
+
+        run = create_run("/tmp/fake", scheme="MyApp")
+        run = export_archive(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertIn("archive", run.error.lower())
+
+    def test_upload_no_ipa_fails_with_message(self):
+        """Upload fails clearly when no IPA exists."""
+        from boss.ios_delivery.engine import create_run, upload_artifact
+        from boss.ios_delivery.state import DeliveryPhase, UploadTarget
+
+        run = create_run("/tmp/fake", upload_target=UploadTarget.TESTFLIGHT.value)
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertIn("IPA", run.error)
+
+    def test_upload_missing_signing_config_fails(self):
+        """Upload fails with clear credential error when no signing config exists."""
+        from boss.ios_delivery.engine import create_run, upload_artifact
+        from boss.ios_delivery.state import DeliveryPhase, UploadStatus, UploadTarget
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake")
+        run = create_run("/tmp/fake", upload_target=UploadTarget.TESTFLIGHT.value)
+        run.ipa_path = str(ipa)
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertEqual(run.upload_status, UploadStatus.FAILED.value)
+        self.assertIn("credential", run.error.lower())
+
+    def test_upload_corrupt_signing_config_fails(self):
+        """Upload fails when signing config is malformed JSON."""
+        from boss.ios_delivery.engine import create_run, upload_artifact
+        from boss.ios_delivery.signing import _signing_config_path
+        from boss.ios_delivery.state import DeliveryPhase, UploadTarget
+
+        cfg_path = _signing_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text("{not valid json", encoding="utf-8")
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake")
+        run = create_run("/tmp/fake", upload_target=UploadTarget.TESTFLIGHT.value)
+        run.ipa_path = str(ipa)
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+
+    def test_inspect_non_ios_project_fails_cleanly(self):
+        """Inspecting a directory with no Xcode project fails cleanly."""
+        from boss.ios_delivery.engine import create_run, inspect_project
+        from boss.ios_delivery.state import DeliveryPhase
+
+        with tempfile.TemporaryDirectory() as td:
+            run = create_run(td)
+            run = inspect_project(run)
+            self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+            self.assertIn("No Xcode project", run.error)
+            self.assertTrue(run.is_terminal)
+
+
+class TestSigningReadinessIntegration(unittest.TestCase):
+    """Verify signing readiness checks for various credential states."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    def test_no_config_reports_not_configured(self):
+        """No signing config file results in can_upload=False."""
+        from boss.ios_delivery.signing import check_signing_readiness
+        readiness = check_signing_readiness()
+        self.assertFalse(readiness.can_upload)
+
+    def test_valid_config_with_key(self):
+        """Valid API key config with existing .p8 reports can_upload=True."""
+        from boss.ios_delivery.signing import (
+            _signing_config_path, check_signing_readiness,
+        )
+        key_path = self._td_path / "AuthKey.p8"
+        key_path.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+        key_path.chmod(0o600)
+
+        cfg_path = _signing_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps({
+            "api_key": {
+                "key_id": "ABCDEF1234",
+                "issuer_id": "11111111-1111-1111-1111-111111111111",
+                "key_path": str(key_path),
+            },
+            "team_id": "TEAM123456",
+        }), encoding="utf-8")
+
+        readiness = check_signing_readiness()
+        self.assertTrue(readiness.can_upload)
+
+    def test_world_readable_p8_blocks_upload(self):
+        """World-readable .p8 file reports INSECURE_PERMISSIONS."""
+        from boss.ios_delivery.signing import (
+            _signing_config_path, check_signing_readiness,
+        )
+        key_path = self._td_path / "AuthKey.p8"
+        key_path.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+        key_path.chmod(0o644)
+
+        cfg_path = _signing_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps({
+            "api_key": {
+                "key_id": "ABCDEF1234",
+                "issuer_id": "11111111-1111-1111-1111-111111111111",
+                "key_path": str(key_path),
+            },
+        }), encoding="utf-8")
+
+        readiness = check_signing_readiness()
+        self.assertFalse(readiness.can_upload)
+        api_check = next((c for c in readiness.checks if c.name == "api_key"), None)
+        self.assertIsNotNone(api_check)
+        self.assertEqual(api_check.status, "insecure_permissions")
+
+
+class TestDevDoctorIOSChecks(unittest.TestCase):
+    """Verify dev_doctor iOS delivery check functions exist and run."""
+
+    def test_toolchain_checks_return_list(self):
+        """check_ios_delivery_toolchain returns a list of Check objects."""
+        import importlib
+        import importlib.util
+        import sys
+        spec = importlib.util.spec_from_file_location(
+            "dev_doctor",
+            str(Path(__file__).resolve().parent.parent / "scripts" / "dev_doctor.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dev_doctor"] = mod
+        spec.loader.exec_module(mod)
+        checks = mod.check_ios_delivery_toolchain()
+        self.assertIsInstance(checks, list)
+        self.assertGreater(len(checks), 0)
+        labels = [c.label for c in checks]
+        self.assertTrue(any("xcodebuild" in l for l in labels))
+        self.assertTrue(any("xcrun" in l for l in labels))
+        self.assertTrue(any("fastlane" in l for l in labels))
+
+    def test_signing_config_check_returns_check(self):
+        """check_ios_signing_config returns a Check object."""
+        import importlib
+        import importlib.util
+        import sys
+        spec = importlib.util.spec_from_file_location(
+            "dev_doctor",
+            str(Path(__file__).resolve().parent.parent / "scripts" / "dev_doctor.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["dev_doctor"] = mod
+        spec.loader.exec_module(mod)
+        check = mod.check_ios_signing_config()
+        self.assertIsNotNone(check)
+        self.assertIsInstance(check.ok, bool)
+        self.assertIsInstance(check.detail, str)
+
+
+# ── Agent tool registration tests ──────────────────────────────────
+
+
+class TestIOSDeliveryToolRegistration(unittest.TestCase):
+    """Verify the governed iOS delivery tools are registered correctly."""
+
+    def test_start_ios_delivery_is_registered(self):
+        """start_ios_delivery is registered in the tool metadata registry."""
+        from boss.execution import ExecutionType, get_tool_metadata
+        # Force tool module import so decorators run
+        import boss.tools.ios  # noqa: F401
+        meta = get_tool_metadata("start_ios_delivery")
+        self.assertIsNotNone(meta, "start_ios_delivery not found in tool registry")
+        self.assertEqual(meta.execution_type, ExecutionType.RUN)
+        self.assertEqual(meta.title, "Start iOS Delivery")
+
+    def test_ios_delivery_status_is_registered(self):
+        """ios_delivery_status is registered as a READ tool."""
+        from boss.execution import ExecutionType, get_tool_metadata
+        import boss.tools.ios  # noqa: F401
+        meta = get_tool_metadata("ios_delivery_status")
+        self.assertIsNotNone(meta, "ios_delivery_status not found in tool registry")
+        self.assertEqual(meta.execution_type, ExecutionType.READ)
+
+    def test_start_ios_delivery_requires_approval(self):
+        """start_ios_delivery has RUN execution type, not auto-allowed."""
+        from boss.execution import AUTO_ALLOWED_EXECUTION_TYPES, get_tool_metadata
+        import boss.tools.ios  # noqa: F401
+        meta = get_tool_metadata("start_ios_delivery")
+        self.assertNotIn(meta.execution_type, AUTO_ALLOWED_EXECUTION_TYPES)
+
+    def test_ios_delivery_status_is_auto_allowed(self):
+        """ios_delivery_status has READ execution type, which is auto-allowed."""
+        from boss.execution import AUTO_ALLOWED_EXECUTION_TYPES, get_tool_metadata
+        import boss.tools.ios  # noqa: F401
+        meta = get_tool_metadata("ios_delivery_status")
+        self.assertIn(meta.execution_type, AUTO_ALLOWED_EXECUTION_TYPES)
+
+    def test_scope_key_is_deterministic(self):
+        """start_ios_delivery scope_key is consistent for permission rules."""
+        from boss.execution import get_tool_metadata
+        import boss.tools.ios  # noqa: F401
+        meta = get_tool_metadata("start_ios_delivery")
+        key1 = meta.scope_key({"project_path": "/tmp/MyApp"})
+        key2 = meta.scope_key({"project_path": "/tmp/OtherApp"})
+        # All delivery runs share the same scope key
+        self.assertEqual(key1, key2)
+        self.assertEqual(key1, "ios-delivery:run")
+
+
+class TestIOSDeliveryToolModeFiltering(unittest.TestCase):
+    """Verify mode filtering: ask/plan/review exclude start_ios_delivery."""
+
+    def test_agent_mode_includes_delivery_tools(self):
+        """Agent mode includes both start_ios_delivery and ios_delivery_status."""
+        from boss.agents import _filter_tools, _mode_policy
+        from boss.tools.ios import ios_delivery_status, start_ios_delivery
+        policy = _mode_policy("agent")
+        tools = [start_ios_delivery, ios_delivery_status]
+        filtered = _filter_tools(tools, policy=policy)
+        names = {getattr(t, "name", "") for t in filtered}
+        self.assertIn("start_ios_delivery", names)
+        self.assertIn("ios_delivery_status", names)
+
+    def test_ask_mode_excludes_start_delivery(self):
+        """Ask mode does not include start_ios_delivery (RUN type)."""
+        from boss.agents import _filter_tools, _mode_policy
+        from boss.tools.ios import ios_delivery_status, start_ios_delivery
+        policy = _mode_policy("ask")
+        tools = [start_ios_delivery, ios_delivery_status]
+        filtered = _filter_tools(tools, policy=policy)
+        names = {getattr(t, "name", "") for t in filtered}
+        self.assertNotIn("start_ios_delivery", names)
+        # READ tool should still be present
+        self.assertIn("ios_delivery_status", names)
+
+    def test_plan_mode_excludes_start_delivery(self):
+        """Plan mode does not include start_ios_delivery."""
+        from boss.agents import _filter_tools, _mode_policy
+        from boss.tools.ios import start_ios_delivery
+        policy = _mode_policy("plan")
+        filtered = _filter_tools([start_ios_delivery], policy=policy)
+        names = {getattr(t, "name", "") for t in filtered}
+        self.assertNotIn("start_ios_delivery", names)
+
+    def test_review_mode_excludes_start_delivery(self):
+        """Review mode does not include start_ios_delivery."""
+        from boss.agents import _filter_tools, _mode_policy
+        from boss.tools.ios import start_ios_delivery
+        policy = _mode_policy("review")
+        filtered = _filter_tools([start_ios_delivery], policy=policy)
+        names = {getattr(t, "name", "") for t in filtered}
+        self.assertNotIn("start_ios_delivery", names)
+
+
+class TestStartIOSDeliveryToolIntegration(unittest.TestCase):
+    """Verify the start_ios_delivery tool creates runs via existing engine."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+        from boss.runner.engine import _current_runner_var
+        self._runner_token = _current_runner_var.set(None)
+
+    def tearDown(self):
+        from boss.runner.engine import _current_runner_var
+        _current_runner_var.reset(self._runner_token)
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    @staticmethod
+    def _unwrap_tool(tool_obj):
+        """Extract the original user function from an agents FunctionTool.
+
+        The @governed_function_tool decorator wraps the function with
+        @function_tool, which produces a FunctionTool dataclass.  The
+        original function is stored in a closure cell of the invoker.
+        """
+        invoker = getattr(tool_obj, "on_invoke_tool", None)
+        if invoker is None:
+            return None
+        impl = getattr(invoker, "_invoke_tool_impl", None)
+        if impl is None:
+            return None
+        if impl.__closure__:
+            for cell in impl.__closure__:
+                val = cell.cell_contents
+                if callable(val) and hasattr(val, "__name__"):
+                    return val
+        return None
+
+    def test_tool_function_creates_run_and_starts_pipeline(self):
+        """The actual governed tool function creates a run and spawns the pipeline thread."""
+        from boss.ios_delivery.state import list_runs
+        from boss.tools.ios import start_ios_delivery
+
+        fn = self._unwrap_tool(start_ios_delivery)
+        self.assertIsNotNone(fn, "Could not unwrap start_ios_delivery")
+
+        with patch("boss.ios_delivery.engine.run_full_pipeline") as mock_pipeline, \
+             patch("boss.runner.engine.get_runner") as mock_get_runner:
+            mock_get_runner.return_value = MagicMock()
+            result = fn(
+                project_path=str(self._td_path),
+                scheme="MyApp",
+                configuration="Release",
+                export_method="app-store",
+                upload_target="testflight",
+            )
+
+        self.assertIn("iOS delivery run started", result)
+        self.assertIn("Scheme: MyApp", result)
+        self.assertIn("Upload target: testflight", result)
+
+        # Verify it persisted through the engine, not a parallel path
+        runs = list_runs(limit=10)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].scheme, "MyApp")
+        self.assertEqual(runs[0].upload_target, "testflight")
+
+    def test_tool_function_rejects_blank_project_path(self):
+        """The tool rejects blank project_path like the API does."""
+        from boss.tools.ios import start_ios_delivery
+
+        fn = self._unwrap_tool(start_ios_delivery)
+        self.assertIsNotNone(fn)
+
+        result = fn(project_path="")
+        self.assertIn("project_path is required", result)
+
+    def test_tool_function_rejects_whitespace_only_path(self):
+        """Whitespace-only project_path is treated as blank."""
+        from boss.tools.ios import start_ios_delivery
+
+        fn = self._unwrap_tool(start_ios_delivery)
+        self.assertIsNotNone(fn)
+
+        result = fn(project_path="   ")
+        self.assertIn("project_path is required", result)
+
+    def test_tool_function_default_options(self):
+        """The tool uses sensible defaults matching the API contract."""
+        from boss.ios_delivery.state import list_runs
+        from boss.tools.ios import start_ios_delivery
+
+        fn = self._unwrap_tool(start_ios_delivery)
+        self.assertIsNotNone(fn)
+
+        with patch("boss.ios_delivery.engine.run_full_pipeline"), \
+             patch("boss.runner.engine.get_runner"):
+            result = fn(project_path=str(self._td_path))
+
+        self.assertIn("iOS delivery run started", result)
+        runs = list_runs(limit=10)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0].configuration, "Release")
+        self.assertEqual(runs[0].export_method, "app-store")
+        self.assertEqual(runs[0].upload_target, "none")
+
+    def test_governed_tool_has_needs_approval(self):
+        """The FunctionTool object has a needs_approval callback (not False)."""
+        from boss.tools.ios import start_ios_delivery
+
+        self.assertTrue(callable(start_ios_delivery.needs_approval),
+                        "start_ios_delivery should have a callable needs_approval")
+
+    def test_tool_restores_runner_after_return(self):
+        """start_ios_delivery must not leave the deploy runner on the caller's context."""
+        from boss.runner.engine import _current_runner_var, get_runner
+        from boss.tools.ios import start_ios_delivery
+
+        fn = self._unwrap_tool(start_ios_delivery)
+        self.assertIsNotNone(fn)
+
+        # Set up a workspace-level runner (the caller's context).
+        original_runner = get_runner(mode="agent", workspace_root=str(self._td_path))
+        self.assertEqual(original_runner.policy.profile, "workspace_write")
+
+        with patch("boss.ios_delivery.engine.run_full_pipeline"):
+            fn(project_path=str(self._td_path), scheme="RestoreTest")
+
+        # After the tool returns, the caller's runner should be restored.
+        restored = _current_runner_var.get(None)
+        self.assertIs(restored, original_runner,
+                      "start_ios_delivery should restore the previous runner")
+        self.assertEqual(restored.policy.profile, "workspace_write")
+
+
+class TestIOSDeliveryStatusTool(unittest.TestCase):
+    """Verify the ios_delivery_status tool reads from existing engine
+    and drives upload status-transition checks.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    @staticmethod
+    def _unwrap_tool(tool_obj):
+        """Extract the original function from an agents FunctionTool."""
+        invoker = getattr(tool_obj, "on_invoke_tool", None)
+        if invoker is None:
+            return None
+        impl = getattr(invoker, "_invoke_tool_impl", None)
+        if impl is None:
+            return None
+        if impl.__closure__:
+            for cell in impl.__closure__:
+                val = cell.cell_contents
+                if callable(val) and hasattr(val, "__name__"):
+                    return val
+        return None
+
+    def test_overview_with_no_runs(self):
+        """delivery_status returns overview when no runs exist."""
+        from boss.ios_delivery.engine import delivery_status
+        status = delivery_status()
+        self.assertEqual(status["total_runs"], 0)
+        self.assertIsInstance(status["active_runs"], list)
+        self.assertEqual(len(status["active_runs"]), 0)
+
+    def test_specific_run_detail(self):
+        """load_run returns detail for a known run."""
+        from boss.ios_delivery.engine import create_run
+        from boss.ios_delivery.state import load_run
+
+        run = create_run(str(self._td_path), scheme="DetailApp")
+        loaded = load_run(run.run_id)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.phase, "pending")
+        self.assertEqual(loaded.scheme, "DetailApp")
+
+    def test_overview_shows_active_run(self):
+        """delivery_status includes a non-terminal run in active_runs."""
+        from boss.ios_delivery.engine import create_run, delivery_status
+
+        run = create_run(str(self._td_path), scheme="ActiveApp")
+        status = delivery_status()
+        self.assertEqual(status["total_runs"], 1)
+        self.assertEqual(len(status["active_runs"]), 1)
+        self.assertEqual(status["active_runs"][0]["scheme"], "ActiveApp")
+
+    def test_status_tool_calls_check_processing_status_when_processing(self):
+        """ios_delivery_status invokes check_processing_status when upload is processing."""
+        from boss.ios_delivery.engine import create_run
+        from boss.ios_delivery.state import UploadMethod, UploadStatus, save_run
+        from boss.ios_delivery.upload import ProcessingStatus
+        from boss.tools.ios import ios_delivery_status
+
+        fn = self._unwrap_tool(ios_delivery_status)
+        self.assertIsNotNone(fn, "Could not unwrap ios_delivery_status")
+
+        run = create_run(str(self._td_path), scheme="UploadApp", upload_target="testflight")
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.XCRUN_ALTOOL.value
+        save_run(run)
+
+        still_processing = ProcessingStatus(
+            status=UploadStatus.PROCESSING.value,
+            detail="Still processing",
+        )
+        with patch("boss.ios_delivery.upload.check_processing_status", return_value=still_processing) as spy:
+            result = fn(run_id=run.run_id)
+
+        spy.assert_called_once()
+        self.assertIn("Upload status: processing", result)
+
+    def test_status_tool_reflects_processing_to_ready_transition(self):
+        """ios_delivery_status surfaces a processing→ready transition."""
+        from boss.ios_delivery.engine import create_run
+        from boss.ios_delivery.state import (
+            DeliveryPhase, UploadMethod, UploadStatus, load_run, save_run,
+        )
+        from boss.ios_delivery.upload import ProcessingStatus
+        from boss.tools.ios import ios_delivery_status
+
+        fn = self._unwrap_tool(ios_delivery_status)
+        self.assertIsNotNone(fn)
+
+        run = create_run(str(self._td_path), scheme="ReadyApp", upload_target="testflight")
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.FASTLANE_PILOT.value
+        run.phase = DeliveryPhase.UPLOADING.value
+        save_run(run)
+
+        ready_result = ProcessingStatus(
+            status=UploadStatus.READY.value,
+            detail="Build is ready for testing on TestFlight",
+        )
+        with patch("boss.ios_delivery.upload.check_processing_status", return_value=ready_result):
+            # check_processing_status persists the transition internally via _persist_status_transition,
+            # but we also mocked it, so we simulate the persistence.
+            # Manually persist the transition so the reload picks it up.
+            run.upload_status = UploadStatus.READY.value
+            run.phase = DeliveryPhase.COMPLETED.value
+            save_run(run)
+
+            result = fn(run_id=run.run_id)
+
+        self.assertIn("Upload status: ready", result)
+        self.assertIn("Phase: completed", result)
+
+    def test_status_tool_skips_check_when_not_processing(self):
+        """ios_delivery_status does NOT call check_processing_status for pending runs."""
+        from boss.ios_delivery.engine import create_run
+        from boss.tools.ios import ios_delivery_status
+
+        fn = self._unwrap_tool(ios_delivery_status)
+        self.assertIsNotNone(fn)
+
+        run = create_run(str(self._td_path), scheme="PendingApp")
+
+        with patch("boss.ios_delivery.upload.check_processing_status") as spy:
+            result = fn(run_id=run.run_id)
+
+        spy.assert_not_called()
+        self.assertIn("Phase: pending", result)
+
+    def test_status_tool_skips_check_when_uploading(self):
+        """ios_delivery_status must NOT poll during uploading state.
+
+        Calling check_processing_status on an altool run with
+        upload_status='uploading' would prematurely mutate it to
+        'processing'.  The tool should only poll once the run has
+        reached 'processing'.
+        """
+        from boss.ios_delivery.engine import create_run
+        from boss.ios_delivery.state import UploadMethod, UploadStatus, save_run
+        from boss.tools.ios import ios_delivery_status
+
+        fn = self._unwrap_tool(ios_delivery_status)
+        self.assertIsNotNone(fn)
+
+        run = create_run(str(self._td_path), scheme="AltoolApp", upload_target="testflight")
+        run.upload_status = UploadStatus.UPLOADING.value
+        run.upload_method = UploadMethod.XCRUN_ALTOOL.value
+        save_run(run)
+
+        with patch("boss.ios_delivery.upload.check_processing_status") as spy:
+            result = fn(run_id=run.run_id)
+
+        spy.assert_not_called()
+        self.assertIn("Upload status: uploading", result)
+
+
 if __name__ == "__main__":
     unittest.main()

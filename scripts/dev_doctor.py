@@ -60,6 +60,9 @@ def main() -> int:
         checks.append(check_git_status(status))
         checks.append(check_boss_control(status))
 
+    checks.extend(check_ios_delivery_toolchain())
+    checks.append(check_ios_signing_config())
+
     print(f"Boss Dev Doctor\nroot: {ROOT}\nbase_url: {BASE_URL}\n")
     for check in checks:
         prefix = "PASS" if check.ok else "FAIL"
@@ -215,6 +218,95 @@ def check_boss_control(status: dict) -> Check:
 
     detail = f"mode={control.get('default_mode', 'default')} rules={health.get('rules_count', len(control.get('rules') or []))}"
     return Check("boss control", True, detail)
+
+
+# ── iOS Delivery prerequisites ──────────────────────────────────
+
+
+def check_ios_delivery_toolchain() -> list[Check]:
+    """Check for xcodebuild, xcrun, fastlane, and security on PATH."""
+    import shutil
+
+    results: list[Check] = []
+
+    for tool, required in [("xcodebuild", True), ("xcrun", True), ("fastlane", False), ("security", False)]:
+        path = shutil.which(tool)
+        if path:
+            version = _probe_tool_version(tool)
+            label = f"ios toolchain: {tool}"
+            results.append(Check(label, True, f"{path} ({version})"))
+        elif required:
+            results.append(Check(f"ios toolchain: {tool}", False, f"{tool} not found on PATH — install Xcode"))
+        else:
+            results.append(Check(f"ios toolchain: {tool}", True, f"{tool} not found (optional)"))
+
+    # Xcode developer directory
+    try:
+        xcode_select = subprocess.run(
+            ["xcode-select", "-p"], capture_output=True, text=True, timeout=5, check=False
+        )
+        if xcode_select.returncode == 0:
+            xcode_path = xcode_select.stdout.strip()
+            results.append(Check("ios toolchain: xcode-select", True, xcode_path))
+        else:
+            results.append(Check("ios toolchain: xcode-select", False, "No Xcode developer directory configured"))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        results.append(Check("ios toolchain: xcode-select", False, "xcode-select not available"))
+
+    return results
+
+
+def _probe_tool_version(tool: str) -> str:
+    """Try to get a version string from a tool."""
+    import re
+
+    version_args = {
+        "xcodebuild": ["-version"],
+        "xcrun": ["--version"],
+        "fastlane": ["--version"],
+        "security": ["--help"],  # security doesn't have --version
+    }
+    args = version_args.get(tool, ["--version"])
+    try:
+        result = subprocess.run(
+            [tool] + args, capture_output=True, text=True, timeout=10, check=False
+        )
+        output = (result.stdout + result.stderr).strip()
+        # Extract first version-like pattern
+        match = re.search(r"\d+\.\d+(?:\.\d+)?", output)
+        return match.group(0) if match else output.split("\n")[0][:60]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
+def check_ios_signing_config() -> Check:
+    """Check if iOS signing credentials are configured."""
+    config_path = Path.home() / ".boss" / "ios-signing.json"
+    if not config_path.exists():
+        return Check(
+            "ios signing config", True,
+            f"Not configured at {config_path} (optional — required for TestFlight uploads)"
+        )
+    try:
+        import json as _json
+        data = _json.loads(config_path.read_text())
+        parts: list[str] = []
+        if data.get("api_key"):
+            ak = data["api_key"]
+            key_id = ak.get("key_id", "")
+            parts.append(f"api_key={key_id[:4]}…" if len(key_id) > 4 else f"api_key={'set' if key_id else 'empty'}")
+            key_path = ak.get("key_path", "")
+            if key_path:
+                key_exists = Path(key_path).expanduser().exists()
+                parts.append(f"p8={'found' if key_exists else 'MISSING'}")
+        if data.get("team_id"):
+            parts.append(f"team={data['team_id']}")
+        if data.get("fastlane"):
+            parts.append("fastlane=configured")
+        summary = ", ".join(parts) if parts else "present but empty"
+        return Check("ios signing config", True, summary)
+    except (ValueError, KeyError):
+        return Check("ios signing config", False, f"Config at {config_path} is corrupt — cannot parse JSON")
 
 
 if __name__ == "__main__":

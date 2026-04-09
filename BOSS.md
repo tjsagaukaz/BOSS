@@ -34,9 +34,10 @@ Be concise. Do not narrate your process. Do not emit planning chatter, status up
 ## Repo Structure
 
 - `boss/` — Python backend: API, agents, execution governance, memory, loop engine, prompting, tools.
-- `BossApp/Sources/` — SwiftUI macOS client: API client, chat UI, permissions, jobs, diagnostics.
+- `boss/ios_delivery/` — iOS delivery pipeline: archive, export, sign, upload to TestFlight.
+- `BossApp/Sources/` — SwiftUI macOS client: API client, chat UI, permissions, jobs, diagnostics, iOS delivery.
 - `.boss/` — Project control files: config, rules, environment, review behavior.
-- `docs/` — Design notes and architecture documents.
+- `docs/` — Design notes, architecture documents, iOS delivery guide.
 - `scripts/` — Dev tooling: smoke tests, release checks, branch helpers.
 
 ## Instruction Layering

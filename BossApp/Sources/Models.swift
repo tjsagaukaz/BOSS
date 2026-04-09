@@ -44,6 +44,7 @@ enum AppSurface: Equatable {
     case preview
     case workers
     case deploy
+    case iosDelivery
     case settings
 }
 
@@ -1416,5 +1417,150 @@ struct DeploymentInfo: Identifiable, Decodable, Equatable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case finishedAt = "finished_at"
+    }
+}
+
+// MARK: - iOS Delivery Models
+
+struct IOSDeliveryStatusInfo: Decodable, Equatable {
+    let activeRuns: [IOSDeliveryRunInfo]
+    let recentCompleted: [IOSDeliveryRunInfo]
+    let totalRuns: Int
+    let signing: SigningReadinessInfo
+
+    enum CodingKeys: String, CodingKey {
+        case activeRuns = "active_runs"
+        case recentCompleted = "recent_completed"
+        case totalRuns = "total_runs"
+        case signing
+    }
+}
+
+struct IOSDeliveryRunInfo: Decodable, Equatable, Identifiable {
+    var id: String { runId }
+
+    let runId: String
+    let projectPath: String
+    let xcodeprojPath: String?
+    let xcworkspacePath: String?
+    let scheme: String?
+    let configuration: String
+    let exportMethod: String
+    let bundleIdentifier: String?
+    let signingMode: String
+    let teamId: String?
+    let archivePath: String?
+    let ipaPath: String?
+    let dsymPath: String?
+    let uploadTarget: String
+    let uploadStatus: String
+    let uploadMethod: String
+    let uploadId: String?
+    let uploadStartedAt: Double?
+    let uploadFinishedAt: Double?
+    let phase: String
+    let error: String?
+    let buildLog: String
+    let exportLog: String
+    let uploadLog: String
+    let createdAt: Double
+    let updatedAt: Double
+    let finishedAt: Double?
+    let metadata: AnyCodable?
+    let version: Int
+
+    var isTerminal: Bool {
+        phase == "completed" || phase == "failed" || phase == "cancelled"
+    }
+
+    var projectName: String {
+        (projectPath as NSString).lastPathComponent
+    }
+
+    static func == (lhs: IOSDeliveryRunInfo, rhs: IOSDeliveryRunInfo) -> Bool {
+        lhs.runId == rhs.runId && lhs.phase == rhs.phase && lhs.updatedAt == rhs.updatedAt && lhs.version == rhs.version
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case runId = "run_id"
+        case projectPath = "project_path"
+        case xcodeprojPath = "xcodeproj_path"
+        case xcworkspacePath = "xcworkspace_path"
+        case scheme
+        case configuration
+        case exportMethod = "export_method"
+        case bundleIdentifier = "bundle_identifier"
+        case signingMode = "signing_mode"
+        case teamId = "team_id"
+        case archivePath = "archive_path"
+        case ipaPath = "ipa_path"
+        case dsymPath = "dsym_path"
+        case uploadTarget = "upload_target"
+        case uploadStatus = "upload_status"
+        case uploadMethod = "upload_method"
+        case uploadId = "upload_id"
+        case uploadStartedAt = "upload_started_at"
+        case uploadFinishedAt = "upload_finished_at"
+        case phase
+        case error
+        case buildLog = "build_log"
+        case exportLog = "export_log"
+        case uploadLog = "upload_log"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case finishedAt = "finished_at"
+        case metadata
+        case version
+    }
+}
+
+struct SigningReadinessInfo: Decodable, Equatable {
+    let configFileExists: Bool
+    let configFileCorrupt: Bool
+    let canUpload: Bool
+    let canSign: Bool
+    let checks: [CredentialCheckInfo]
+    let configCorruptReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case configFileExists = "config_file_exists"
+        case configFileCorrupt = "config_file_corrupt"
+        case canUpload = "can_upload"
+        case canSign = "can_sign"
+        case checks
+        case configCorruptReason = "config_corrupt_reason"
+    }
+}
+
+struct CredentialCheckInfo: Decodable, Equatable, Identifiable {
+    var id: String { name }
+    let name: String
+    let status: String
+    let detail: String
+}
+
+struct IOSDeliveryEventInfo: Decodable, Equatable, Identifiable {
+    var id: String { "\(timestamp)-\(type)" }
+    let timestamp: Double
+    let type: String
+    let message: String
+    let payload: AnyCodable?
+
+    static func == (lhs: IOSDeliveryEventInfo, rhs: IOSDeliveryEventInfo) -> Bool {
+        lhs.timestamp == rhs.timestamp && lhs.type == rhs.type && lhs.message == rhs.message
+    }
+}
+
+struct UploadProcessingInfo: Decodable, Equatable {
+    let status: String
+    let detail: String
+    let buildNumber: String?
+    let version: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case detail
+        case buildNumber = "build_number"
+        case version
     }
 }

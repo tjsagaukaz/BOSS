@@ -11,6 +11,7 @@ This repository is a local-first personal agent split between a Python backend a
 - `boss/tools/`: local tools for macOS actions, memory, and research.
 - `boss/memory/`: SQLite-backed knowledge store and system/project scanning.
 - `boss/persistence/`: conversation history persistence.
+- `boss/ios_delivery/`: iOS archive, export, sign, and TestFlight upload pipeline.
 - `BossApp/Sources/`: SwiftUI app, API client, chat state, markdown rendering, permissions UI.
 - `start-server.sh`: local backend launcher for the FastAPI server.
 - `docs/`: design notes and target architecture documents.

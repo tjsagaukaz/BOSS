@@ -60,6 +60,8 @@ struct ContentView: View {
             WorkersView()
         case .deploy:
             DeployView()
+        case .iosDelivery:
+            IOSDeliveryView()
         case .settings:
             SettingsView()
         }
@@ -107,7 +109,8 @@ private struct SurfaceKeyboardShortcuts: ViewModifier {
     private static let surfaceMap: [Character: AppSurface] = [
         "1": .chat, "2": .memory, "3": .diagnostics,
         "4": .jobs, "5": .review, "6": .permissions,
-        "7": .preview, "8": .workers, "9": .deploy
+        "7": .preview, "8": .workers, "9": .deploy,
+        "0": .iosDelivery
     ]
 
     func body(content: Content) -> some View {
@@ -119,7 +122,7 @@ private struct SurfaceKeyboardShortcuts: ViewModifier {
                 }
                 return .ignored
             }
-            .onKeyPress(characters: CharacterSet(charactersIn: "123456789"), phases: .down) { press in
+            .onKeyPress(characters: CharacterSet(charactersIn: "1234567890"), phases: .down) { press in
                 guard press.modifiers == .command,
                       let surface = Self.surfaceMap[press.characters.first ?? " "] else {
                     return .ignored
@@ -207,6 +210,12 @@ struct SidebarView: View {
 
             sidebarNavRow("Deploy", selected: vm.selectedSurface == .deploy) {
                 vm.showDeploy()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
+
+            sidebarNavRow("iOS Delivery", selected: vm.selectedSurface == .iosDelivery) {
+                vm.showIOSDelivery()
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 12)

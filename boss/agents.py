@@ -29,7 +29,9 @@ from boss.tools.intelligence import (
 )
 from boss.tools.ios import (
     inspect_xcode_project,
+    ios_delivery_status,
     list_xcode_schemes,
+    start_ios_delivery,
     summarize_ios_project,
 )
 from boss.tools.memory import (
@@ -136,6 +138,7 @@ def build_entry_agent(
         [remember, recall, list_known_projects, get_project_details, search_project_content, memory_stats,
          find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
          inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
+         start_ios_delivery, ios_delivery_status,
          start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
         policy=policy,
     )
@@ -143,6 +146,7 @@ def build_entry_agent(
         [recall, list_known_projects, get_project_details, search_project_content,
          find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
          inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
+         start_ios_delivery, ios_delivery_status,
          start_preview_server, stop_preview_server, capture_preview, preview_status_tool],
         policy=policy,
     )

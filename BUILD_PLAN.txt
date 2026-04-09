@@ -153,6 +153,14 @@ Project Structure
     context/
       __init__.py
       manager.py
+    ios_delivery/
+      __init__.py
+      engine.py
+      runner.py
+      signing.py
+      state.py
+      toolchain.py
+      upload.py
 
 Verification Targets
 - Basic Q and A routes through the general entry agent.
@@ -163,3 +171,8 @@ Verification Targets
 - Provider registry resolves correct provider per mode.
 - Anthropic provider passes health check when API key is set.
 - Capability fallback works when a provider is unavailable.
+- iOS delivery pipeline: inspect → archive → export → upload lifecycle.
+- iOS toolchain detection: xcodebuild, xcrun, fastlane presence.
+- iOS signing readiness: credential validation, insecure permission rejection.
+- iOS upload: fastlane pilot preferred, xcrun altool fallback.
+- iOS status persistence: run state survives across restarts.

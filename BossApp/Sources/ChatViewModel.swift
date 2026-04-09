@@ -38,6 +38,7 @@ final class ChatViewModel: ObservableObject {
     var reviewState = ReviewState()
     var workersState = WorkersState()
     var deployState = DeployState()
+    var iosDeliveryState = IOSDeliveryState()
     var memoryState = MemoryState()
 
     private let api = APIClient.shared
@@ -76,6 +77,7 @@ final class ChatViewModel: ObservableObject {
         reviewState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         workersState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         deployState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        iosDeliveryState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         memoryState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
 
         // Wire memory mutation callback to refresh sidebar
@@ -602,6 +604,14 @@ final class ChatViewModel: ObservableObject {
     func showDeploy() {
         selectedSurface = .deploy
         Task { await deployState.refresh() }
+    }
+
+    func showIOSDelivery(runId: String? = nil) {
+        selectedSurface = .iosDelivery
+        Task {
+            await iosDeliveryState.refresh()
+            if let runId { await iosDeliveryState.focusRun(runId) }
+        }
     }
 
     func refreshPreviewSurface() async {
