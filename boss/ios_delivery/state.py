@@ -68,6 +68,25 @@ class UploadTarget(StrEnum):
     NONE = "none"
 
 
+class UploadStatus(StrEnum):
+    """Granular upload lifecycle status."""
+
+    NOT_STARTED = "not_started"
+    CREDENTIAL_CHECK = "credential_check"
+    UPLOADING = "uploading"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class UploadMethod(StrEnum):
+    """Which CLI tool performs the upload."""
+
+    FASTLANE_PILOT = "fastlane_pilot"
+    XCRUN_ALTOOL = "xcrun_altool"
+    NONE = "none"
+
+
 _TERMINAL_PHASES = frozenset({
     DeliveryPhase.COMPLETED,
     DeliveryPhase.FAILED,
@@ -105,6 +124,11 @@ class IOSDeliveryRun:
 
     # ── Upload
     upload_target: str = UploadTarget.NONE.value
+    upload_status: str = UploadStatus.NOT_STARTED.value
+    upload_method: str = UploadMethod.NONE.value
+    upload_id: str | None = None  # Apple's build/upload ID if returned
+    upload_started_at: float | None = None
+    upload_finished_at: float | None = None
 
     # ── Pipeline state
     phase: str = DeliveryPhase.PENDING.value

@@ -1381,19 +1381,21 @@ class TestSigningConfigLoadFromDisk(unittest.TestCase):
         from boss.ios_delivery.signing import load_signing_config
         self.assertIsNone(load_signing_config())
 
-    def test_corrupt_file_returns_none(self):
-        from boss.ios_delivery.signing import load_signing_config, _signing_config_path
+    def test_corrupt_file_raises(self):
+        from boss.ios_delivery.signing import ConfigFileCorrupt, load_signing_config, _signing_config_path
         path = _signing_config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{{{not json", encoding="utf-8")
-        self.assertIsNone(load_signing_config())
+        with self.assertRaises(ConfigFileCorrupt):
+            load_signing_config()
 
-    def test_non_object_returns_none(self):
-        from boss.ios_delivery.signing import load_signing_config, _signing_config_path
+    def test_non_object_raises(self):
+        from boss.ios_delivery.signing import ConfigFileCorrupt, load_signing_config, _signing_config_path
         path = _signing_config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('"just a string"', encoding="utf-8")
-        self.assertIsNone(load_signing_config())
+        with self.assertRaises(ConfigFileCorrupt):
+            load_signing_config()
 
     def test_valid_file_loads(self):
         from boss.ios_delivery.signing import load_signing_config, _signing_config_path
@@ -1439,9 +1441,10 @@ class TestCredentialDiagnostics(unittest.TestCase):
         from boss.ios_delivery.signing import (
             APIKeyConfig, CredentialStatus, SigningConfig, check_signing_readiness,
         )
-        # Create a real .p8 file on disk
+        # Create a real .p8 file on disk with secure permissions
         key_path = self._td_path / "AuthKey.p8"
         key_path.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+        key_path.chmod(0o600)
 
         cfg = SigningConfig(
             api_key=APIKeyConfig(
@@ -1536,6 +1539,7 @@ class TestCredentialDiagnostics(unittest.TestCase):
         r = check_signing_readiness()
         d = r.to_dict()
         self.assertIn("config_file_exists", d)
+        self.assertIn("config_file_corrupt", d)
         self.assertIn("can_upload", d)
         self.assertIn("can_sign", d)
         self.assertIn("checks", d)
@@ -1544,6 +1548,44 @@ class TestCredentialDiagnostics(unittest.TestCase):
             self.assertIn("name", check)
             self.assertIn("status", check)
             self.assertIn("detail", check)
+
+    def test_corrupt_config_reports_invalid_not_unconfigured(self):
+        """Malformed ios-signing.json should produce INVALID checks, not NOT_CONFIGURED."""
+        from boss.ios_delivery.signing import (
+            CredentialStatus, _signing_config_path, check_signing_readiness,
+        )
+        path = _signing_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{{{bad json", encoding="utf-8")
+
+        r = check_signing_readiness()
+        self.assertTrue(r.config_file_exists)
+        self.assertTrue(r.config_file_corrupt)
+        self.assertFalse(r.can_upload)
+        self.assertFalse(r.can_sign)
+        for c in r.checks:
+            self.assertEqual(c.status, CredentialStatus.INVALID,
+                             f"{c.name} should be INVALID for corrupt config")
+            self.assertIn("malformed", c.detail.lower())
+
+    def test_world_readable_key_not_upload_ready(self):
+        """A .p8 at chmod 644 should be INSECURE_PERMISSIONS, not AVAILABLE."""
+        from boss.ios_delivery.signing import (
+            APIKeyConfig, CredentialStatus, SigningConfig, check_signing_readiness,
+        )
+        key_path = self._td_path / "AuthKey.p8"
+        key_path.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+        key_path.chmod(0o644)  # world-readable
+
+        cfg = SigningConfig(
+            api_key=APIKeyConfig("K1", "IIIIIIIIIIII", str(key_path)),
+            team_id="ABCD1234EF",
+        )
+        r = check_signing_readiness(cfg)
+        api_check = next(c for c in r.checks if c.name == "api_key")
+        self.assertEqual(api_check.status, CredentialStatus.INSECURE_PERMISSIONS)
+        self.assertFalse(r.can_upload)
+        self.assertIn("chmod 600", api_check.detail)
 
 
 class TestSigningReadinessSummary(unittest.TestCase):
@@ -1612,6 +1654,738 @@ class TestEngineSigningConfigIntegration(unittest.TestCase):
         self.assertIn("can_upload", status["signing"])
         self.assertIn("can_sign", status["signing"])
         self.assertIn("checks", status["signing"])
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload: command construction
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadCommandConstruction(unittest.TestCase):
+    """Toolchain command builders for upload CLIs."""
+
+    def test_pilot_upload_command(self):
+        from boss.ios_delivery.toolchain import build_pilot_upload_command
+        cmd = build_pilot_upload_command(
+            ipa_path="/build/App.ipa",
+            api_key_path="/keys/api_key.json",
+        )
+        self.assertEqual(cmd[0], "fastlane")
+        self.assertEqual(cmd[1], "pilot")
+        self.assertEqual(cmd[2], "upload")
+        self.assertIn("--ipa", cmd)
+        self.assertIn("/build/App.ipa", cmd)
+        self.assertIn("--api_key_path", cmd)
+        self.assertIn("/keys/api_key.json", cmd)
+        self.assertIn("--skip_waiting_for_build_processing", cmd)
+
+    def test_pilot_upload_extra_args(self):
+        from boss.ios_delivery.toolchain import build_pilot_upload_command
+        cmd = build_pilot_upload_command(
+            ipa_path="/build/App.ipa",
+            api_key_path="/keys/api_key.json",
+            extra_args=["--skip_submission", "true"],
+        )
+        self.assertIn("--skip_submission", cmd)
+
+    def test_altool_upload_command(self):
+        from boss.ios_delivery.toolchain import build_altool_upload_command
+        cmd = build_altool_upload_command(
+            ipa_path="/build/App.ipa",
+            api_key="ABC123",
+            api_issuer="ISSUER-UUID",
+        )
+        self.assertEqual(cmd[:2], ["xcrun", "altool"])
+        self.assertIn("--upload-app", cmd)
+        self.assertIn("--file", cmd)
+        self.assertIn("/build/App.ipa", cmd)
+        self.assertIn("--type", cmd)
+        self.assertIn("ios", cmd)
+        self.assertIn("--apiKey", cmd)
+        self.assertIn("ABC123", cmd)
+        self.assertIn("--apiIssuer", cmd)
+        self.assertIn("ISSUER-UUID", cmd)
+
+    def test_altool_upload_extra_args(self):
+        from boss.ios_delivery.toolchain import build_altool_upload_command
+        cmd = build_altool_upload_command(
+            ipa_path="/build/App.ipa",
+            api_key="ABC123",
+            api_issuer="ISSUER-UUID",
+            extra_args=["--output-format", "json"],
+        )
+        self.assertIn("--output-format", cmd)
+        self.assertIn("json", cmd)
+
+    def test_pilot_builds_command(self):
+        from boss.ios_delivery.toolchain import build_pilot_builds_command
+        cmd = build_pilot_builds_command(
+            api_key_path="/keys/api_key.json",
+            app_identifier="com.example.app",
+        )
+        self.assertEqual(cmd[:2], ["fastlane", "pilot"])
+        self.assertIn("builds", cmd)
+        self.assertIn("--api_key_path", cmd)
+        self.assertIn("--app_identifier", cmd)
+        self.assertIn("com.example.app", cmd)
+
+    def test_pilot_builds_without_app_identifier(self):
+        from boss.ios_delivery.toolchain import build_pilot_builds_command
+        cmd = build_pilot_builds_command(api_key_path="/keys/api_key.json")
+        self.assertNotIn("--app_identifier", cmd)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload: state model extensions
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadStateFields(unittest.TestCase):
+    """Verify new upload tracking fields on IOSDeliveryRun."""
+
+    def test_default_upload_fields(self):
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, UploadMethod, UploadStatus, new_run_id,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        self.assertEqual(run.upload_status, UploadStatus.NOT_STARTED.value)
+        self.assertEqual(run.upload_method, UploadMethod.NONE.value)
+        self.assertIsNone(run.upload_id)
+        self.assertIsNone(run.upload_started_at)
+        self.assertIsNone(run.upload_finished_at)
+
+    def test_upload_fields_round_trip(self):
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, UploadMethod, UploadStatus, new_run_id,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.FASTLANE_PILOT.value
+        run.upload_id = "BUILD-123"
+        run.upload_started_at = 1000.0
+        run.upload_finished_at = 2000.0
+
+        d = run.to_dict()
+        restored = IOSDeliveryRun.from_dict(d)
+        self.assertEqual(restored.upload_status, UploadStatus.PROCESSING.value)
+        self.assertEqual(restored.upload_method, UploadMethod.FASTLANE_PILOT.value)
+        self.assertEqual(restored.upload_id, "BUILD-123")
+        self.assertEqual(restored.upload_started_at, 1000.0)
+        self.assertEqual(restored.upload_finished_at, 2000.0)
+
+    def test_upload_status_enum_values(self):
+        from boss.ios_delivery.state import UploadStatus
+        self.assertEqual(UploadStatus.NOT_STARTED, "not_started")
+        self.assertEqual(UploadStatus.CREDENTIAL_CHECK, "credential_check")
+        self.assertEqual(UploadStatus.UPLOADING, "uploading")
+        self.assertEqual(UploadStatus.PROCESSING, "processing")
+        self.assertEqual(UploadStatus.READY, "ready")
+        self.assertEqual(UploadStatus.FAILED, "failed")
+
+    def test_upload_method_enum_values(self):
+        from boss.ios_delivery.state import UploadMethod
+        self.assertEqual(UploadMethod.FASTLANE_PILOT, "fastlane_pilot")
+        self.assertEqual(UploadMethod.XCRUN_ALTOOL, "xcrun_altool")
+        self.assertEqual(UploadMethod.NONE, "none")
+
+    def test_backward_compat_old_run_without_upload_fields(self):
+        """Runs persisted before upload fields were added should load fine."""
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadStatus
+        old_data = {
+            "run_id": "old-run",
+            "project_path": "/tmp",
+            "phase": "completed",
+        }
+        run = IOSDeliveryRun.from_dict(old_data)
+        self.assertEqual(run.upload_status, UploadStatus.NOT_STARTED.value)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload: credential validation
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadCredentialValidation(unittest.TestCase):
+    """validate_upload_credentials checks signing readiness."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    def test_no_config_file_fails(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.upload import validate_upload_credentials
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        ok, detail = validate_upload_credentials(run)
+        self.assertFalse(ok)
+        self.assertIn("No signing config", detail)
+
+    def test_corrupt_config_fails(self):
+        from boss.ios_delivery.signing import _signing_config_path
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.upload import validate_upload_credentials
+        path = _signing_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{{{bad", encoding="utf-8")
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        ok, detail = validate_upload_credentials(run)
+        self.assertFalse(ok)
+        self.assertIn("malformed", detail)
+
+    def test_missing_api_key_fails(self):
+        from boss.ios_delivery.signing import _signing_config_path
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.upload import validate_upload_credentials
+        path = _signing_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"team_id": "ABCD1234EF"}), encoding="utf-8")
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        ok, detail = validate_upload_credentials(run)
+        self.assertFalse(ok)
+        self.assertIn("not ready", detail)
+
+    def test_valid_api_key_succeeds(self):
+        from boss.ios_delivery.signing import _signing_config_path
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.upload import validate_upload_credentials
+        key_path = self._td_path / "AuthKey.p8"
+        key_path.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+        key_path.chmod(0o600)
+        path = _signing_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "api_key": {
+                "key_id": "K1",
+                "issuer_id": "IIIIIIIIIIII",
+                "key_path": str(key_path),
+            },
+        }), encoding="utf-8")
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        ok, detail = validate_upload_credentials(run)
+        self.assertTrue(ok)
+        self.assertIn("available", detail.lower())
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload: strategy resolution
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadStrategyResolution(unittest.TestCase):
+    """resolve_upload_plan picks the right CLI tool."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    def _write_signing_config(self, data):
+        from boss.ios_delivery.signing import _signing_config_path
+        path = _signing_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_no_config_returns_none(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.upload import resolve_upload_plan
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.ipa_path = "/build/App.ipa"
+        self.assertIsNone(resolve_upload_plan(run))
+
+    def test_no_ipa_returns_none(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.upload import resolve_upload_plan
+        self._write_signing_config({
+            "api_key": {"key_id": "K1", "issuer_id": "I1", "key_path": "/k.p8"},
+        })
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        self.assertIsNone(resolve_upload_plan(run))
+
+    def test_altool_strategy_when_no_fastlane(self):
+        """xcrun altool is used when fastlane is not available."""
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadMethod, new_run_id
+        from boss.ios_delivery.toolchain import IOSToolchain, ToolInfo
+        from boss.ios_delivery.upload import UploadStrategy, resolve_upload_plan
+
+        self._write_signing_config({
+            "api_key": {"key_id": "K1", "issuer_id": "I1", "key_path": "/k.p8"},
+        })
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.ipa_path = "/build/App.ipa"
+
+        mock_toolchain = IOSToolchain(
+            xcodebuild=ToolInfo("xcodebuild", True),
+            xcrun=ToolInfo("xcrun", True),
+            fastlane=ToolInfo("fastlane", False),
+            security=ToolInfo("security", True),
+        )
+        with patch("boss.ios_delivery.toolchain.get_toolchain", return_value=mock_toolchain):
+            plan = resolve_upload_plan(run)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.strategy, UploadStrategy.XCRUN_ALTOOL)
+        self.assertEqual(plan.method, UploadMethod.XCRUN_ALTOOL)
+        self.assertIn("altool", plan.command[1])
+        self.assertIn("K1", plan.command)
+
+    def test_pilot_strategy_when_fastlane_with_api_key(self):
+        """fastlane pilot is preferred when available with api_key_path."""
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadMethod, new_run_id
+        from boss.ios_delivery.toolchain import IOSToolchain, ToolInfo
+        from boss.ios_delivery.upload import UploadStrategy, resolve_upload_plan
+
+        api_key_json = self._td_path / "api_key.json"
+        api_key_json.write_text("{}")
+        self._write_signing_config({
+            "api_key": {"key_id": "K1", "issuer_id": "I1", "key_path": "/k.p8"},
+            "fastlane": {"api_key_path": str(api_key_json)},
+        })
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.ipa_path = "/build/App.ipa"
+
+        mock_toolchain = IOSToolchain(
+            xcodebuild=ToolInfo("xcodebuild", True),
+            xcrun=ToolInfo("xcrun", True),
+            fastlane=ToolInfo("fastlane", True, path="/usr/local/bin/fastlane"),
+            security=ToolInfo("security", True),
+        )
+        with patch("boss.ios_delivery.toolchain.get_toolchain", return_value=mock_toolchain):
+            plan = resolve_upload_plan(run)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.strategy, UploadStrategy.FASTLANE_PILOT)
+        self.assertEqual(plan.method, UploadMethod.FASTLANE_PILOT)
+        self.assertEqual(plan.command[0], "fastlane")
+
+    def test_falls_back_to_altool_when_api_key_json_missing(self):
+        """If fastlane api_key_path file doesn't exist, fall back to altool."""
+        from boss.ios_delivery.state import IOSDeliveryRun, new_run_id
+        from boss.ios_delivery.toolchain import IOSToolchain, ToolInfo
+        from boss.ios_delivery.upload import UploadStrategy, resolve_upload_plan
+
+        self._write_signing_config({
+            "api_key": {"key_id": "K1", "issuer_id": "I1", "key_path": "/k.p8"},
+            "fastlane": {"api_key_path": "/nonexistent/api_key.json"},
+        })
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.ipa_path = "/build/App.ipa"
+
+        mock_toolchain = IOSToolchain(
+            xcodebuild=ToolInfo("xcodebuild", True),
+            xcrun=ToolInfo("xcrun", True),
+            fastlane=ToolInfo("fastlane", True, path="/usr/local/bin/fastlane"),
+            security=ToolInfo("security", True),
+        )
+        with patch("boss.ios_delivery.toolchain.get_toolchain", return_value=mock_toolchain):
+            plan = resolve_upload_plan(run)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.strategy, UploadStrategy.XCRUN_ALTOOL)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload: output parsing
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadOutputParsing(unittest.TestCase):
+    """Extract upload IDs and errors from CLI output."""
+
+    def test_extract_altool_request_uuid(self):
+        from boss.ios_delivery.upload import UploadStrategy, _extract_upload_id
+        output = "No errors uploading '/build/App.ipa'.\nRequestUUID = abc-123-def"
+        uid = _extract_upload_id(output, UploadStrategy.XCRUN_ALTOOL)
+        self.assertEqual(uid, "abc-123-def")
+
+    def test_extract_altool_no_uuid(self):
+        from boss.ios_delivery.upload import UploadStrategy, _extract_upload_id
+        output = "No errors uploading '/build/App.ipa'."
+        uid = _extract_upload_id(output, UploadStrategy.XCRUN_ALTOOL)
+        self.assertIsNone(uid)
+
+    def test_extract_pilot_build_number(self):
+        from boss.ios_delivery.upload import UploadStrategy, _extract_upload_id
+        output = "Successfully uploaded build: 42"
+        uid = _extract_upload_id(output, UploadStrategy.FASTLANE_PILOT)
+        self.assertEqual(uid, "42")
+
+    def test_extract_error_itms(self):
+        from boss.ios_delivery.upload import UploadStrategy, _extract_error_detail
+        output = 'ERROR ITMS-90062: "The bundle identifier is not valid"'
+        detail = _extract_error_detail(output, UploadStrategy.XCRUN_ALTOOL)
+        self.assertIn("bundle identifier", detail)
+
+    def test_extract_error_generic(self):
+        from boss.ios_delivery.upload import UploadStrategy, _extract_error_detail
+        output = "error: Unable to authenticate with App Store Connect"
+        detail = _extract_error_detail(output, UploadStrategy.XCRUN_ALTOOL)
+        self.assertIn("Unable to authenticate", detail)
+
+    def test_extract_error_empty_output(self):
+        from boss.ios_delivery.upload import UploadStrategy, _extract_error_detail
+        detail = _extract_error_detail("", UploadStrategy.XCRUN_ALTOOL)
+        self.assertIsNone(detail)
+
+    def test_parse_pilot_processing(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadStatus, new_run_id
+        from boss.ios_delivery.upload import _parse_pilot_builds_output
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        output = "Build 42 | Processing..."
+        result = _parse_pilot_builds_output(output, run)
+        self.assertEqual(result.status, UploadStatus.PROCESSING.value)
+
+    def test_parse_pilot_ready(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadStatus, new_run_id
+        from boss.ios_delivery.upload import _parse_pilot_builds_output
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        output = "Build 42 | Active | Ready for Testing"
+        result = _parse_pilot_builds_output(output, run)
+        self.assertEqual(result.status, UploadStatus.READY.value)
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload: processing status check
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadProcessingStatus(unittest.TestCase):
+    """check_processing_status returns structured status."""
+
+    def test_not_started(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadStatus, new_run_id
+        from boss.ios_delivery.upload import check_processing_status
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        status = check_processing_status(run)
+        self.assertEqual(status.status, UploadStatus.NOT_STARTED.value)
+
+    def test_failed(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadStatus, new_run_id
+        from boss.ios_delivery.upload import check_processing_status
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.upload_status = UploadStatus.FAILED.value
+        run.error = "Auth failed"
+        status = check_processing_status(run)
+        self.assertEqual(status.status, UploadStatus.FAILED.value)
+        self.assertIn("Auth failed", status.detail)
+
+    def test_ready(self):
+        from boss.ios_delivery.state import IOSDeliveryRun, UploadStatus, new_run_id
+        from boss.ios_delivery.upload import check_processing_status
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.upload_status = UploadStatus.READY.value
+        run.metadata["build_number"] = "42"
+        status = check_processing_status(run)
+        self.assertEqual(status.status, UploadStatus.READY.value)
+        self.assertEqual(status.build_number, "42")
+
+    def test_altool_processing_no_query(self):
+        """altool uploads report processing with advisory to check ASC."""
+        from boss.ios_delivery.state import (
+            IOSDeliveryRun, UploadMethod, UploadStatus, new_run_id,
+        )
+        from boss.ios_delivery.upload import check_processing_status
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path="/tmp")
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.upload_method = UploadMethod.XCRUN_ALTOOL.value
+        status = check_processing_status(run)
+        self.assertEqual(status.status, UploadStatus.PROCESSING.value)
+        self.assertIn("App Store Connect", status.detail)
+
+    def test_status_to_dict(self):
+        from boss.ios_delivery.upload import ProcessingStatus
+        ps = ProcessingStatus(
+            status="ready", detail="Ready", build_number="42", version="1.0",
+        )
+        d = ps.to_dict()
+        self.assertEqual(d["status"], "ready")
+        self.assertEqual(d["build_number"], "42")
+        self.assertEqual(d["version"], "1.0")
+
+
+# ════════════════════════════════════════════════════════════════════
+#  Upload: engine integration (upload_artifact)
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestUploadArtifactEngine(unittest.TestCase):
+    """upload_artifact credential gating and state transitions."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._td_path = Path(self._td.name)
+        self._ctx = override_settings(app_data_dir=self._td_path)
+        self._ctx.__enter__()
+        from boss.ios_delivery.engine import _cancel_lock, _cancelled_ids
+        with _cancel_lock:
+            _cancelled_ids.clear()
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+        self._td.cleanup()
+
+    def test_upload_none_target_skips(self):
+        """upload_target=none skips upload and completes."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadTarget, new_run_id,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.NONE.value
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.COMPLETED.value)
+
+    def test_upload_no_ipa_fails(self):
+        """Upload without IPA path fails."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, UploadTarget, new_run_id,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertEqual(run.upload_status, UploadStatus.FAILED.value)
+        self.assertIn("no IPA", run.error)
+
+    def test_upload_missing_ipa_file_fails(self):
+        """Upload with IPA path that doesn't exist fails."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, UploadTarget, new_run_id,
+        )
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = "/nonexistent/App.ipa"
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertEqual(run.upload_status, UploadStatus.FAILED.value)
+        self.assertIn("not found", run.error)
+
+    def test_upload_no_credentials_fails(self):
+        """Upload with no signing config fails at credential check."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, UploadTarget, new_run_id,
+        )
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertEqual(run.upload_status, UploadStatus.FAILED.value)
+        self.assertIn("credential", run.error.lower())
+
+    def test_upload_no_viable_plan_fails(self):
+        """Upload with credentials but no viable tool fails."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadStatus, UploadTarget, new_run_id,
+        )
+
+        # Set up valid credentials
+        key_path = self._td_path / "AuthKey.p8"
+        key_path.write_text("-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n")
+        key_path.chmod(0o600)
+        from boss.ios_delivery.signing import _signing_config_path
+        cfg_path = _signing_config_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        cfg_path.write_text(json.dumps({
+            "api_key": {"key_id": "K1", "issuer_id": "IIIIIIIIIIII", "key_path": str(key_path)},
+        }), encoding="utf-8")
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+
+        # Mock resolve_upload_plan to return None (no tools available)
+        with patch("boss.ios_delivery.upload.resolve_upload_plan", return_value=None):
+            run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertIn("No viable upload path", run.error)
+
+    def test_upload_success_via_altool(self):
+        """Successful altool upload sets processing status."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadMethod, UploadStatus,
+            UploadTarget, new_run_id,
+        )
+        from boss.ios_delivery.upload import UploadPlan, UploadResult, UploadStrategy
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+
+        mock_plan = UploadPlan(
+            strategy=UploadStrategy.XCRUN_ALTOOL,
+            command=["xcrun", "altool", "--upload-app"],
+            method=UploadMethod.XCRUN_ALTOOL,
+            description="test",
+            api_key_id="K1",
+        )
+        mock_result = UploadResult(
+            success=True, exit_code=0, stdout="No errors uploading.\nRequestUUID = UUID-123",
+            stderr="", duration_ms=5000.0, governed=False, upload_id="UUID-123",
+        )
+
+        with patch("boss.ios_delivery.upload.validate_upload_credentials", return_value=(True, "ok")), \
+             patch("boss.ios_delivery.upload.resolve_upload_plan", return_value=mock_plan), \
+             patch("boss.ios_delivery.upload.execute_upload", return_value=mock_result):
+            run = upload_artifact(run)
+
+        self.assertEqual(run.phase, DeliveryPhase.COMPLETED.value)
+        self.assertEqual(run.upload_status, UploadStatus.PROCESSING.value)
+        self.assertEqual(run.upload_id, "UUID-123")
+        self.assertEqual(run.upload_method, UploadMethod.XCRUN_ALTOOL.value)
+        self.assertIsNotNone(run.upload_finished_at)
+
+    def test_upload_success_via_pilot_ready(self):
+        """Successful pilot upload with 'successfully' in output marks ready."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadMethod, UploadStatus,
+            UploadTarget, new_run_id,
+        )
+        from boss.ios_delivery.upload import UploadPlan, UploadResult, UploadStrategy
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+
+        mock_plan = UploadPlan(
+            strategy=UploadStrategy.FASTLANE_PILOT,
+            command=["fastlane", "pilot", "upload"],
+            method=UploadMethod.FASTLANE_PILOT,
+            description="test",
+            api_key_id="K1",
+        )
+        mock_result = UploadResult(
+            success=True, exit_code=0,
+            stdout="Successfully uploaded build 42 to TestFlight",
+            stderr="", duration_ms=8000.0, governed=False, upload_id="42",
+        )
+
+        with patch("boss.ios_delivery.upload.validate_upload_credentials", return_value=(True, "ok")), \
+             patch("boss.ios_delivery.upload.resolve_upload_plan", return_value=mock_plan), \
+             patch("boss.ios_delivery.upload.execute_upload", return_value=mock_result):
+            run = upload_artifact(run)
+
+        self.assertEqual(run.phase, DeliveryPhase.COMPLETED.value)
+        self.assertEqual(run.upload_status, UploadStatus.READY.value)
+        self.assertEqual(run.upload_method, UploadMethod.FASTLANE_PILOT.value)
+
+    def test_upload_failure_records_error(self):
+        """Failed upload sets proper error state."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadMethod, UploadStatus,
+            UploadTarget, new_run_id,
+        )
+        from boss.ios_delivery.upload import UploadPlan, UploadResult, UploadStrategy
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+
+        mock_plan = UploadPlan(
+            strategy=UploadStrategy.XCRUN_ALTOOL,
+            command=["xcrun", "altool", "--upload-app"],
+            method=UploadMethod.XCRUN_ALTOOL,
+            description="test",
+            api_key_id="K1",
+        )
+        mock_result = UploadResult(
+            success=False, exit_code=1,
+            stdout="", stderr="ERROR ITMS-90062: Invalid bundle",
+            duration_ms=3000.0, governed=False,
+            error_detail="Invalid bundle identifier",
+        )
+
+        with patch("boss.ios_delivery.upload.validate_upload_credentials", return_value=(True, "ok")), \
+             patch("boss.ios_delivery.upload.resolve_upload_plan", return_value=mock_plan), \
+             patch("boss.ios_delivery.upload.execute_upload", return_value=mock_result):
+            run = upload_artifact(run)
+
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertEqual(run.upload_status, UploadStatus.FAILED.value)
+        self.assertIn("Invalid bundle", run.error)
+
+    def test_upload_cancelled_before_execution(self):
+        """Cancellation before upload execution stops the run."""
+        from boss.ios_delivery.engine import _cancel_lock, _cancelled_ids, upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadTarget, new_run_id,
+        )
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+
+        with _cancel_lock:
+            _cancelled_ids.add(run.run_id)
+        run = upload_artifact(run)
+        self.assertEqual(run.phase, DeliveryPhase.CANCELLED.value)
+
+    def test_upload_policy_denied(self):
+        """Policy denial returns proper error."""
+        from boss.ios_delivery.engine import upload_artifact
+        from boss.ios_delivery.state import (
+            DeliveryPhase, IOSDeliveryRun, UploadMethod, UploadStatus,
+            UploadTarget, new_run_id,
+        )
+        from boss.ios_delivery.upload import UploadPlan, UploadResult, UploadStrategy
+
+        ipa = self._td_path / "App.ipa"
+        ipa.write_bytes(b"fake-ipa")
+
+        run = IOSDeliveryRun(run_id=new_run_id(), project_path=str(self._td_path))
+        run.upload_target = UploadTarget.TESTFLIGHT.value
+        run.ipa_path = str(ipa)
+
+        mock_plan = UploadPlan(
+            strategy=UploadStrategy.XCRUN_ALTOOL,
+            command=["xcrun", "altool"],
+            method=UploadMethod.XCRUN_ALTOOL,
+            description="test",
+        )
+        mock_result = UploadResult(
+            success=False, exit_code=None,
+            stdout="", stderr="", duration_ms=0.0, governed=True,
+            error_detail="Command denied by policy",
+        )
+
+        with patch("boss.ios_delivery.upload.validate_upload_credentials", return_value=(True, "ok")), \
+             patch("boss.ios_delivery.upload.resolve_upload_plan", return_value=mock_plan), \
+             patch("boss.ios_delivery.upload.execute_upload", return_value=mock_result):
+            run = upload_artifact(run)
+
+        self.assertEqual(run.phase, DeliveryPhase.FAILED.value)
+        self.assertEqual(run.upload_status, UploadStatus.FAILED.value)
+        self.assertIn("denied", run.error.lower())
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@ relevant phase, persists the result, and returns it.  The caller (tool layer
 or API endpoint) decides which phases to execute and in what order.
 
 Archive and export phases execute real ``xcodebuild`` commands through the
-Boss Runner governance layer.  Upload remains scaffolded for later.
+Boss Runner governance layer.  Upload uses ``fastlane pilot`` (preferred) or
+``xcrun altool`` with App Store Connect API key authentication.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from boss.ios_delivery.state import (
     ExportMethod,
     IOSDeliveryRun,
     SigningMode,
+    UploadMethod,
+    UploadStatus,
     UploadTarget,
     append_event,
     new_run_id,
@@ -189,8 +192,11 @@ def inspect_project(run: IOSDeliveryRun) -> IOSDeliveryRun:
 
     # Supplement team_id from signing config if the project didn't provide one
     if not run.team_id:
-        from boss.ios_delivery.signing import load_signing_config
-        signing_cfg = load_signing_config()
+        from boss.ios_delivery.signing import ConfigFileCorrupt, load_signing_config
+        try:
+            signing_cfg = load_signing_config()
+        except ConfigFileCorrupt:
+            signing_cfg = None
         if signing_cfg and signing_cfg.team_id:
             run.team_id = signing_cfg.team_id
             append_event(
@@ -502,10 +508,15 @@ def export_options_dict(run: IOSDeliveryRun) -> dict[str, Any]:
 
 
 def upload_artifact(run: IOSDeliveryRun) -> IOSDeliveryRun:
-    """Upload the exported IPA to the configured target.
+    """Upload the exported IPA to TestFlight / App Store Connect.
 
-    Scaffolding only — actual execution deferred until credentials and
-    ``xcrun altool`` / ``xcrun notarytool`` integration is built.
+    Uses ``fastlane pilot upload`` when available with API key JSON,
+    otherwise falls back to ``xcrun altool --upload-app``.  Both paths
+    use App Store Connect API key authentication — never Apple ID
+    passwords.
+
+    The upload is executed through the governed runner, so it is
+    subject to the same policy checks as build commands.
     """
     if _check_cancelled(run):
         return run
@@ -523,27 +534,123 @@ def upload_artifact(run: IOSDeliveryRun) -> IOSDeliveryRun:
     if not run.ipa_path:
         run.phase = DeliveryPhase.FAILED.value
         run.error = "Cannot upload: no IPA path"
+        run.upload_status = UploadStatus.FAILED.value
         save_run(run)
         return run
 
-    # Prepare the upload command (not executed yet)
-    if run.upload_target in (
-        UploadTarget.TESTFLIGHT.value,
-        UploadTarget.APP_STORE_CONNECT.value,
-    ):
-        cmd_parts = [
-            "xcrun", "altool",
-            "--upload-app",
-            "--file", run.ipa_path,
-            "--type", "ios",
-        ]
-        run.metadata["upload_command"] = cmd_parts
+    if not Path(run.ipa_path).exists():
+        run.phase = DeliveryPhase.FAILED.value
+        run.error = f"Cannot upload: IPA not found at {run.ipa_path}"
+        run.upload_status = UploadStatus.FAILED.value
+        save_run(run)
+        return run
+
+    # ── Credential check ──
+    from boss.ios_delivery.upload import (
+        execute_upload,
+        resolve_upload_plan,
+        validate_upload_credentials,
+    )
+
+    run.upload_status = UploadStatus.CREDENTIAL_CHECK.value
+    save_run(run)
+
+    creds_ok, creds_detail = validate_upload_credentials(run)
+    if not creds_ok:
+        run.phase = DeliveryPhase.FAILED.value
+        run.error = f"Upload credential check failed: {creds_detail}"
+        run.upload_status = UploadStatus.FAILED.value
         append_event(
             run.run_id,
-            event_type="upload_command",
-            message="Upload command prepared (execution deferred)",
-            payload={"command": cmd_parts, "target": run.upload_target},
+            event_type="upload_credential_failed",
+            message=creds_detail,
         )
+        save_run(run)
+        return run
+
+    # ── Resolve strategy ──
+    plan = resolve_upload_plan(run)
+    if plan is None:
+        run.phase = DeliveryPhase.FAILED.value
+        run.error = (
+            "No viable upload path: need fastlane with API key JSON "
+            "or xcrun altool with API key configured"
+        )
+        run.upload_status = UploadStatus.FAILED.value
+        save_run(run)
+        return run
+
+    run.metadata["upload_strategy"] = plan.strategy.value
+    run.metadata["upload_command_preview"] = " ".join(plan.command[:5]) + "..."
+    run.upload_method = plan.method.value
+
+    # Re-check cancellation before the long upload
+    if _check_cancelled(run):
+        return run
+
+    # ── Execute upload ──
+    upload_result = execute_upload(run, plan)
+    run.metadata["upload_result"] = upload_result.to_dict()
+
+    # Re-check cancellation after subprocess finishes
+    if _check_cancelled(run):
+        return run
+
+    if upload_result.exit_code is None and upload_result.error_detail:
+        # Policy denied
+        run.phase = DeliveryPhase.FAILED.value
+        run.error = f"Upload command denied: {upload_result.error_detail}"
+        run.upload_status = UploadStatus.FAILED.value
+        append_event(
+            run.run_id,
+            event_type="upload_denied",
+            message=run.error,
+        )
+        save_run(run)
+        return run
+
+    if not upload_result.success:
+        run.phase = DeliveryPhase.FAILED.value
+        run.error = f"Upload failed: {upload_result.error_detail or 'unknown error'}"
+        run.upload_status = UploadStatus.FAILED.value
+        run.upload_log = (upload_result.stdout + "\n" + upload_result.stderr).strip()
+        append_event(
+            run.run_id,
+            event_type="upload_failed",
+            message=run.error,
+            payload=upload_result.to_dict(),
+        )
+        save_run(run)
+        return run
+
+    # ── Upload succeeded ──
+    run.upload_id = upload_result.upload_id
+    run.upload_finished_at = time.time()
+    run.upload_log = (upload_result.stdout + "\n" + upload_result.stderr).strip()
+
+    # If fastlane pilot waited for processing, it may have confirmed ready
+    if (
+        plan.strategy.value == "fastlane_pilot"
+        and "successfully" in upload_result.stdout.lower()
+    ):
+        run.upload_status = UploadStatus.READY.value
+        run.phase = DeliveryPhase.COMPLETED.value
+    else:
+        # Uploaded but processing not yet confirmed
+        run.upload_status = UploadStatus.PROCESSING.value
+        run.phase = DeliveryPhase.COMPLETED.value
+
+    append_event(
+        run.run_id,
+        event_type="upload_done",
+        message=f"Upload completed in {upload_result.duration_ms:.0f}ms",
+        payload={
+            "strategy": plan.strategy.value,
+            "upload_id": run.upload_id,
+            "upload_status": run.upload_status,
+            "duration_ms": upload_result.duration_ms,
+        },
+    )
 
     save_run(run)
     return run

@@ -264,6 +264,76 @@ def build_fastlane_archive_command(
     return cmd
 
 
+# ── Upload command builders ────────────────────────────────────────
+
+
+def build_pilot_upload_command(
+    *,
+    ipa_path: str,
+    api_key_path: str,
+    extra_args: list[str] | None = None,
+) -> list[str]:
+    """Construct a ``fastlane pilot upload`` command with API key auth.
+
+    Uses ``--api_key_path`` for App Store Connect API authentication,
+    avoiding Apple ID / app-specific password flows.
+    """
+    cmd = [
+        "fastlane", "pilot", "upload",
+        "--ipa", ipa_path,
+        "--api_key_path", api_key_path,
+        "--skip_waiting_for_build_processing", "false",
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+    return cmd
+
+
+def build_altool_upload_command(
+    *,
+    ipa_path: str,
+    api_key: str,
+    api_issuer: str,
+    extra_args: list[str] | None = None,
+) -> list[str]:
+    """Construct an ``xcrun altool --upload-app`` command with API key auth.
+
+    Apple's official upload tool, available with every Xcode install.
+    Uses ``--apiKey`` and ``--apiIssuer`` for App Store Connect API auth.
+    The API key .p8 file must be in one of:
+      - ./private_keys/
+      - ~/private_keys/
+      - ~/.private_keys/
+      - ~/.appstoreconnect/private_keys/
+    """
+    cmd = [
+        "xcrun", "altool",
+        "--upload-app",
+        "--file", ipa_path,
+        "--type", "ios",
+        "--apiKey", api_key,
+        "--apiIssuer", api_issuer,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+    return cmd
+
+
+def build_pilot_builds_command(
+    *,
+    api_key_path: str,
+    app_identifier: str | None = None,
+) -> list[str]:
+    """Construct a ``fastlane pilot builds`` command to check processing state."""
+    cmd = [
+        "fastlane", "pilot", "builds",
+        "--api_key_path", api_key_path,
+    ]
+    if app_identifier:
+        cmd += ["--app_identifier", app_identifier]
+    return cmd
+
+
 # ── Build log diagnostics ──────────────────────────────────────────
 
 

@@ -56,6 +56,7 @@ class CredentialStatus(StrEnum):
     MISSING = "missing"
     UNREADABLE = "unreadable"
     INVALID = "invalid"
+    INSECURE_PERMISSIONS = "insecure_permissions"
     NOT_CONFIGURED = "not_configured"
 
 
@@ -152,11 +153,20 @@ def _signing_config_path() -> Path:
     return settings.app_data_dir / "ios-signing.json"
 
 
+class ConfigFileCorrupt(Exception):
+    """Raised when ios-signing.json exists but cannot be parsed."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def load_signing_config() -> SigningConfig | None:
     """Load the signing config from disk.
 
-    Returns ``None`` if the file doesn't exist.  Logs a warning (without
-    the file contents) if the file is corrupt.
+    Returns ``None`` if the file doesn't exist.  Raises
+    :class:`ConfigFileCorrupt` if the file exists but is malformed, so
+    callers can distinguish "no config" from "broken config."
     """
     path = _signing_config_path()
     if not path.exists():
@@ -167,11 +177,11 @@ def load_signing_config() -> SigningConfig | None:
         data = json.loads(raw)
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Could not load iOS signing config at %s: %s", path, type(exc).__name__)
-        return None
+        raise ConfigFileCorrupt(f"{type(exc).__name__}") from exc
 
     if not isinstance(data, dict):
         logger.warning("iOS signing config at %s is not a JSON object", path)
-        return None
+        raise ConfigFileCorrupt("Config is not a JSON object")
 
     return _parse_config(data)
 
@@ -254,6 +264,8 @@ class SigningReadiness:
     """Aggregate readiness report for iOS signing credentials."""
 
     config_file_exists: bool
+    config_file_corrupt: bool = False
+    config_corrupt_reason: str = ""
     checks: list[CredentialCheck] = field(default_factory=list)
 
     @property
@@ -275,12 +287,16 @@ class SigningReadiness:
         return team_ok
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "config_file_exists": self.config_file_exists,
+            "config_file_corrupt": self.config_file_corrupt,
             "can_upload": self.can_upload,
             "can_sign": self.can_sign,
             "checks": [c.to_dict() for c in self.checks],
         }
+        if self.config_file_corrupt:
+            d["config_corrupt_reason"] = self.config_corrupt_reason
+        return d
 
 
 def check_signing_readiness(config: SigningConfig | None = None) -> SigningReadiness:
@@ -289,26 +305,45 @@ def check_signing_readiness(config: SigningConfig | None = None) -> SigningReadi
     Never reads private key contents.  Only checks existence, file
     permissions, and structural indicators (PEM header presence).
     """
-    if config is None:
-        config = load_signing_config()
-
     config_exists = _signing_config_path().exists()
+    config_corrupt = False
+    corrupt_reason = ""
+
+    if config is None:
+        try:
+            config = load_signing_config()
+        except ConfigFileCorrupt as exc:
+            config_corrupt = True
+            corrupt_reason = exc.reason
+
     checks: list[CredentialCheck] = []
 
-    # ── API Key ──
-    checks.append(_check_api_key(config))
+    if config_corrupt:
+        # File exists but is malformed — report INVALID for every check
+        # so the user sees the real problem instead of "not configured."
+        for name in ("api_key", "team_id", "fastlane", "keychain"):
+            checks.append(CredentialCheck(
+                name=name,
+                status=CredentialStatus.INVALID,
+                detail=f"Config file is malformed: {corrupt_reason}",
+            ))
+    else:
+        # ── API Key ──
+        checks.append(_check_api_key(config))
 
-    # ── Team ID ──
-    checks.append(_check_team_id(config))
+        # ── Team ID ──
+        checks.append(_check_team_id(config))
 
-    # ── Fastlane ──
-    checks.append(_check_fastlane(config))
+        # ── Fastlane ──
+        checks.append(_check_fastlane(config))
 
-    # ── Keychain ──
-    checks.append(_check_keychain(config))
+        # ── Keychain ──
+        checks.append(_check_keychain(config))
 
     return SigningReadiness(
         config_file_exists=config_exists,
+        config_file_corrupt=config_corrupt,
+        config_corrupt_reason=corrupt_reason,
         checks=checks,
     )
 
@@ -364,8 +399,16 @@ def _check_api_key(config: SigningConfig | None) -> CredentialCheck:
             detail=f"Could not read key file header: {_safe_path(key_path)}",
         )
 
-    # Warn about overly permissive file permissions
-    _check_key_file_permissions(key_path)
+    # Reject overly permissive file permissions
+    if _check_key_file_permissions(key_path):
+        return CredentialCheck(
+            name="api_key",
+            status=CredentialStatus.INSECURE_PERMISSIONS,
+            detail=(
+                f"Key file {_safe_path(key_path)} is world-readable. "
+                f"Run: chmod 600 {key_path}"
+            ),
+        )
 
     return CredentialCheck(
         name="api_key",
@@ -480,10 +523,10 @@ def _safe_path(path: Path) -> str:
         return str(path)
 
 
-def _check_key_file_permissions(path: Path) -> None:
-    """Log a warning if the key file is world-readable.
+def _check_key_file_permissions(path: Path) -> bool:
+    """Return True if the key file has insecure (world-readable) permissions.
 
-    Does not change file permissions — only warns.  The user should
+    Does not change file permissions — only checks.  The user should
     ``chmod 600`` their .p8 file.
     """
     try:
@@ -491,13 +534,15 @@ def _check_key_file_permissions(path: Path) -> None:
         if mode & stat.S_IROTH:
             logger.warning(
                 "iOS API key file %s is world-readable (mode %o). "
-                "Consider: chmod 600 %s",
+                "Run: chmod 600 %s",
                 _safe_path(path),
                 mode & 0o777,
                 path,
             )
+            return True
     except OSError:
         pass
+    return False
 
 
 def signing_summary(readiness: SigningReadiness) -> str:

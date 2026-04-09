@@ -2940,3 +2940,35 @@ async def ios_delivery_cancel_run(run_id: str):
         raise HTTPException(status_code=404, detail="iOS delivery run not found")
     run = cancel_run(run)
     return run.to_dict()
+
+
+@app.post("/api/ios-delivery/runs/{run_id}/upload")
+async def ios_delivery_start_upload(run_id: str):
+    """Trigger upload of a completed export to TestFlight / App Store Connect.
+
+    The run must have an IPA path and an upload target other than 'none'.
+    Upload is executed through the governed runner.
+    """
+    from boss.ios_delivery.engine import upload_artifact
+    from boss.ios_delivery.state import UploadTarget, load_run
+    run = load_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="iOS delivery run not found")
+    if not run.ipa_path:
+        raise HTTPException(status_code=400, detail="Run has no IPA — export must complete first")
+    if run.upload_target == UploadTarget.NONE.value:
+        raise HTTPException(status_code=400, detail="Run has no upload target configured")
+    run = upload_artifact(run)
+    return run.to_dict()
+
+
+@app.get("/api/ios-delivery/runs/{run_id}/upload-status")
+async def ios_delivery_upload_status(run_id: str):
+    """Check the processing status of an uploaded build."""
+    from boss.ios_delivery.state import load_run
+    from boss.ios_delivery.upload import check_processing_status
+    run = load_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="iOS delivery run not found")
+    status = check_processing_status(run)
+    return status.to_dict()
