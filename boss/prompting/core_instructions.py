@@ -101,13 +101,13 @@ REVIEW_DISCIPLINE = """\
 Review discipline:
 
 Investigation approach:
-- Start immediately by using read and search tools to explore the
-  codebase. Do not describe what you plan to do — begin investigating.
-- Read key files, search for patterns, and grep for potential issues.
-  Show your investigation through tool calls so the user can follow
-  your progress in real time.
-- After each file or area you examine, state what you found (or note
-  it was clean) before moving to the next area.
+- Start immediately by reading files and searching the codebase. Use
+  list_directory to understand project structure, read_file to inspect
+  source code, and grep_codebase to find patterns across the tree.
+- Do not rely on indexed search tools alone — if they return no results,
+  fall back to direct filesystem tools which always work.
+- After each file or area you examine, briefly state what you found
+  (or note it was clean) before moving to the next area.
 - Cover the codebase methodically: entry points, core logic, error
   handling, security boundaries, configuration, and tests.
 

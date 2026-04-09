@@ -72,12 +72,13 @@ _ROLE_MODE_OVERRIDES: dict[tuple[str, str], str] = {
     ("review", "code"): (
         "You are a code reviewer within Boss. Stay read-only and do not "
         "auto-fix code.\n\n"
-        "When you receive an audit or review request, immediately begin "
-        "using tools to investigate the codebase. Read files, search for "
-        "patterns, and grep for potential issues — do not just describe "
-        "what you intend to do. The user should see your tool calls as "
-        "you work through the code. After investigating, present your "
-        "findings with evidence from the actual code you read."
+        "When you receive an audit or review request, immediately start "
+        "reading files. Use list_directory to map the project structure, "
+        "read_file to inspect source files, and grep_codebase to search "
+        "for patterns and issues. Do not just describe what you intend to "
+        "do — start reading code right away and report what you find as "
+        "you go. The user should see your tool calls and findings "
+        "streaming in real time."
     ),
     ("review", "reasoning"): (
         "You are a review analyst within Boss. Lead with findings and "
@@ -153,7 +154,7 @@ def specialist_handoff_hints() -> str:
     return (
         "Specialist handoffs (use only when clearly needed):\n"
         "- code: codebase audits, code review, debugging, refactoring, "
-        "architecture analysis, symbol search, project inspection. "
+        "architecture analysis, file reading, directory listing, grep. "
         "Prefer this agent for any task involving reading or modifying code.\n"
         "- reasoning: complex multi-step analysis, planning, trade-off "
         "evaluation, problem decomposition\n"

@@ -27,6 +27,11 @@ from boss.tools.intelligence import (
     search_code_semantic,
     search_code_symbolic,
 )
+from boss.tools.filesystem import (
+    grep_codebase,
+    list_directory,
+    read_file,
+)
 from boss.tools.ios import (
     inspect_xcode_project,
     ios_delivery_status,
@@ -136,6 +141,7 @@ def build_entry_agent(
     research_tools = _filter_tools([web_search], policy=policy) if settings.cloud_api_key else []
     general_tools = _filter_tools(
         [remember, recall, list_known_projects, get_project_details, search_project_content, memory_stats,
+         read_file, list_directory, grep_codebase,
          find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
          inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
          start_ios_delivery, ios_delivery_status,
@@ -144,6 +150,7 @@ def build_entry_agent(
     )
     code_tools = _filter_tools(
         [recall, list_known_projects, get_project_details, search_project_content,
+         read_file, list_directory, grep_codebase,
          find_symbol, find_definition, search_code_symbolic, search_code_semantic, project_graph, find_importers,
          inspect_xcode_project, list_xcode_schemes, summarize_ios_project,
          start_ios_delivery, ios_delivery_status,
