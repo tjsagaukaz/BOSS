@@ -9,17 +9,17 @@ struct WorkersView: View {
                 header
                     .padding(.top, 80)
 
-                if let error = vm.workersRefreshError {
+                if let error = vm.workersState.workersRefreshError {
                     InlineStatusBanner(message: error)
                 }
 
                 controlsCard
 
-                if !vm.workPlans.isEmpty {
+                if !vm.workersState.workPlans.isEmpty {
                     plansSection
                 }
 
-                if let plan = vm.selectedWorkPlan {
+                if let plan = vm.workersState.selectedWorkPlan {
                     planDetail(plan)
                 } else {
                     emptyState
@@ -30,7 +30,7 @@ struct WorkersView: View {
             .padding(.bottom, 32)
         }
         .task {
-            await vm.refreshWorkersSurface()
+            await vm.workersState.refresh()
         }
     }
 
@@ -65,38 +65,33 @@ struct WorkersView: View {
 
                 Spacer()
 
-                Button(action: { Task { await vm.refreshWorkersSurface() } }) {
-                    Text("Refresh")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.white.opacity(0.64))
+                BossTertiaryButton(title: "Refresh") {
+                    Task { await vm.workersState.refresh() }
                 }
-                .buttonStyle(.plain)
+                .help("Refresh")
             }
 
             HStack(spacing: 24) {
-                metric(label: "Plans", value: vm.workPlans.count)
-                metric(label: "Running", value: vm.workPlans.filter { $0.status == "running" }.count)
-                metric(label: "Workers", value: vm.workPlans.reduce(0) { $0 + $1.workers.count })
+                metric(label: "Plans", value: vm.workersState.workPlans.count)
+                metric(label: "Running", value: vm.workersState.workPlans.filter { $0.status == "running" }.count)
+                metric(label: "Workers", value: vm.workersState.workPlans.reduce(0) { $0 + $1.workers.count })
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(0.04))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.06)))
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     // MARK: - Plan list
 
     private var plansSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("Recent Plans")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(Color.white.opacity(0.5))
 
-            ForEach(vm.workPlans.prefix(12)) { plan in
-                Button(action: { vm.selectedWorkPlan = plan }) {
+            ForEach(vm.workersState.workPlans.prefix(12)) { plan in
+                Button(action: { vm.workersState.selectedWorkPlan = plan }) {
                     HStack(spacing: 10) {
                         statusDot(plan.status)
                         VStack(alignment: .leading, spacing: 2) {
@@ -118,7 +113,7 @@ struct WorkersView: View {
                     .padding(.vertical, 6)
                     .padding(.horizontal, 10)
                     .background(
-                        vm.selectedWorkPlan?.planId == plan.planId
+                        vm.workersState.selectedWorkPlan?.planId == plan.planId
                             ? Color.white.opacity(0.06)
                             : Color.clear
                     )
@@ -175,27 +170,21 @@ struct WorkersView: View {
             if plan.status == "running" || plan.status == "ready" {
                 HStack(spacing: 12) {
                     if plan.status == "running" {
-                        Button("Cancel") {
+                        BossTertiaryButton(title: "Cancel") {
                             Task {
                                 do {
                                     _ = try await APIClient.shared.cancelWorkPlan(planId: plan.planId)
-                                    await vm.refreshWorkersSurface()
+                                    await vm.workersState.refresh()
                                 } catch {}
                             }
                         }
-                        .buttonStyle(.plain)
-                        .foregroundColor(.red.opacity(0.8))
-                        .font(.system(size: 12))
                     }
                 }
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(0.04))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.06)))
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     // MARK: - Workers section
@@ -286,13 +275,7 @@ struct WorkersView: View {
     }
 
     private func statusPill(_ status: String) -> some View {
-        Text(status.replacingOccurrences(of: "_", with: " "))
-            .font(.system(size: 11, weight: .medium))
-            .foregroundColor(statusColor(status))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(statusColor(status).opacity(0.12))
-            .cornerRadius(4)
+        StatusPill(text: status, color: statusColor(status))
     }
 
     private func statusColor(_ status: String) -> Color {

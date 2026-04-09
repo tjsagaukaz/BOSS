@@ -2,8 +2,18 @@ import SwiftUI
 
 struct PermissionsView: View {
     @EnvironmentObject var vm: ChatViewModel
+    @State private var searchText: String = ""
 
     private let sectionOrder = ["Applications", "System", "Web", "Memory", "Other"]
+
+    private func matchesSearch(_ entry: PermissionEntry) -> Bool {
+        let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return true }
+        return entry.tool.lowercased().contains(q)
+            || entry.rowTitle.lowercased().contains(q)
+            || entry.scopeLabel.lowercased().contains(q)
+            || entry.decision.label.lowercased().contains(q)
+    }
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -11,6 +21,9 @@ struct PermissionsView: View {
                 header
                     .padding(.top, 80)
                     .padding(.bottom, 28)
+
+                SearchBar(text: $searchText, placeholder: "Search permissions…")
+                    .padding(.bottom, 16)
 
                 if let message = vm.permissionsRefreshError {
                     InlineStatusBanner(message: message)
@@ -58,7 +71,8 @@ struct PermissionsView: View {
     }
 
     private var permissionSections: some View {
-        let grouped = Dictionary(grouping: vm.permissions, by: permissionGroup)
+        let filtered = vm.permissions.filter { matchesSearch($0) }
+        let grouped = Dictionary(grouping: filtered, by: permissionGroup)
         let ordered = sectionOrder.filter { grouped[$0] != nil }
         let extra = grouped.keys.filter { !sectionOrder.contains($0) }.sorted()
 
@@ -144,12 +158,8 @@ private struct PermissionRowView: View {
 
                 Spacer()
 
-                Button(action: onRevoke) {
-                    Text("Revoke")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.white.opacity(0.6))
-                }
-                .buttonStyle(.plain)
+                BossTertiaryButton(title: "Revoke") { onRevoke() }
+                    .accessibilityHint("Removes this permission rule")
             }
         }
         .padding(.vertical, 12)

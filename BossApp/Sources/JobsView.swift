@@ -3,6 +3,29 @@ import SwiftUI
 
 struct JobsView: View {
     @EnvironmentObject var vm: ChatViewModel
+    @State private var searchText: String = ""
+    @State private var statusFilter: String = "All"
+
+    private let statusFilters = ["All", "Running", "Waiting", "Completed", "Failed"]
+
+    private var filteredJobs: [BackgroundJobInfo] {
+        vm.jobsState.jobs.filter { job in
+            let matchesStatus: Bool
+            switch statusFilter {
+            case "Running":   matchesStatus = job.status == "running"
+            case "Waiting":   matchesStatus = job.status == "waiting_permission"
+            case "Completed": matchesStatus = job.status == "completed"
+            case "Failed":    matchesStatus = job.status == "failed" || job.status == "cancelled"
+            default:          matchesStatus = true
+            }
+            guard matchesStatus else { return false }
+            let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !q.isEmpty else { return true }
+            return job.title.lowercased().contains(q)
+                || job.prompt.lowercased().contains(q)
+                || job.status.lowercased().contains(q)
+        }
+    }
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -10,17 +33,21 @@ struct JobsView: View {
                 header
                     .padding(.top, 80)
 
-                if let message = vm.jobsRefreshError {
+                if let message = vm.jobsState.jobsRefreshError {
                     InlineStatusBanner(message: message)
                 }
 
                 controlsCard
 
-                if !vm.jobs.isEmpty {
+                SearchBar(text: $searchText, placeholder: "Search jobs…")
+
+                statusFilterRow
+
+                if !filteredJobs.isEmpty {
                     jobsSection
                 }
 
-                if let job = vm.selectedJob {
+                if let job = vm.jobsState.selectedJob {
                     detailSection(job)
                 } else {
                     emptyState
@@ -31,7 +58,7 @@ struct JobsView: View {
             .padding(.bottom, 32)
         }
         .task {
-            await vm.refreshJobsSurface()
+            await vm.jobsState.refresh()
         }
     }
 
@@ -62,29 +89,21 @@ struct JobsView: View {
 
                 Spacer()
 
-                Button(action: { Task { await vm.refreshJobsSurface() } }) {
-                    Text("Refresh")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.white.opacity(0.64))
+                BossTertiaryButton(title: "Refresh") {
+                    Task { await vm.jobsState.refresh() }
                 }
-                .buttonStyle(.plain)
+                .help("Refresh")
             }
 
             HStack(spacing: 24) {
-                metric(label: "Jobs", value: vm.jobs.count)
-                metric(label: "Running", value: vm.jobs.filter { $0.status == "running" }.count)
-                metric(label: "Waiting", value: vm.jobs.filter { $0.status == "waiting_permission" }.count)
+                metric(label: "Jobs", value: vm.jobsState.jobs.count)
+                metric(label: "Running", value: vm.jobsState.jobs.filter { $0.status == "running" }.count)
+                metric(label: "Waiting", value: vm.jobsState.jobs.filter { $0.status == "waiting_permission" }.count)
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     private func metric(label: String, value: Int) -> some View {
@@ -98,15 +117,35 @@ struct JobsView: View {
         }
     }
 
+    private var statusFilterRow: some View {
+        HStack(spacing: 8) {
+            ForEach(statusFilters, id: \.self) { filter in
+                Button(action: { statusFilter = filter }) {
+                    Text(filter)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(statusFilter == filter ? .white : Color.white.opacity(0.45))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule()
+                                .fill(statusFilter == filter ? Color.white.opacity(0.12) : Color.white.opacity(0.04))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer()
+        }
+    }
+
     private var jobsSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionTitle("Recent Jobs", subtitle: "Persistent local history for asynchronous work")
                 .padding(.bottom, 10)
 
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(vm.jobs.prefix(12).enumerated()), id: \.element.id) { index, job in
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(filteredJobs.enumerated()), id: \.element.id) { index, job in
                     jobRow(job)
-                    if index < min(vm.jobs.count, 12) - 1 {
+                    if index < filteredJobs.count - 1 {
                         Rectangle()
                             .fill(Color.white.opacity(0.05))
                             .frame(height: 1)
@@ -117,9 +156,9 @@ struct JobsView: View {
     }
 
     private func jobRow(_ job: BackgroundJobInfo) -> some View {
-        let isSelected = vm.selectedJob?.jobId == job.jobId
+        let isSelected = vm.jobsState.selectedJob?.jobId == job.jobId
         return Button {
-            vm.selectJob(job)
+            vm.jobsState.selectJob(job)
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -153,6 +192,7 @@ struct JobsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusable()
     }
 
     private func detailSection(_ job: BackgroundJobInfo) -> some View {
@@ -160,7 +200,7 @@ struct JobsView: View {
             sectionTitle("Job Detail", subtitle: job.prompt)
                 .padding(.bottom, 10)
 
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 10) {
                     statusPill(job.status)
                     Text(job.mode.capitalized)
@@ -211,7 +251,7 @@ struct JobsView: View {
                     }
                 }
 
-                if let log = vm.selectedJobLog {
+                if let log = vm.jobsState.selectedJobLog {
                     logSection(log)
                 }
             }
@@ -221,42 +261,16 @@ struct JobsView: View {
     private func actionRow(_ job: BackgroundJobInfo) -> some View {
         HStack(spacing: 10) {
             if !terminalStatuses.contains(job.status) {
-                Button(action: { vm.cancelJob(job) }) {
-                    Text("Cancel")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.58))
-                }
-                .buttonStyle(.plain)
+                BossTertiaryButton(title: "Cancel") { vm.jobsState.cancelJob(job) }
             }
 
             if resumableStatuses.contains(job.status) {
-                Button(action: { vm.resumeJob(job) }) {
-                    Text("Resume")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.72))
-                }
-                .buttonStyle(.plain)
+                BossTertiaryButton(title: "Resume") { vm.jobsState.resumeJob(job) }
             }
 
-            Button(action: { vm.takeOverJob(job) }) {
-                Text("Take Over")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill(BossColor.accent)
-                    )
-            }
-            .buttonStyle(.plain)
+            BossPrimaryButton(title: "Take Over") { vm.takeOverJob(job) }
 
-            Button(action: { openPath(job.logPath) }) {
-                Text("Open Log")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Color.white.opacity(0.58))
-            }
-            .buttonStyle(.plain)
+            BossTertiaryButton(title: "Open Log") { openPath(job.logPath) }
         }
     }
 
@@ -266,10 +280,13 @@ struct JobsView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(Color.white.opacity(0.28))
                 .tracking(1.0)
-            Text(value)
-                .font(.system(size: 12))
-                .foregroundColor(Color.white.opacity(0.58))
-                .textSelection(.enabled)
+            HStack(spacing: 4) {
+                Text(value)
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.white.opacity(0.58))
+                    .textSelection(.enabled)
+                CopyButton(value: value)
+            }
         }
     }
 
@@ -329,15 +346,8 @@ struct JobsView: View {
     }
 
     private func statusPill(_ status: String) -> some View {
-        Text(status.replacingOccurrences(of: "_", with: " ").uppercased())
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                Capsule()
-                    .fill(statusColor(status))
-            )
+        StatusPill(text: status.uppercased(), color: statusColor(status))
+            .accessibilityLabel("Status: \(status.replacingOccurrences(of: "_", with: " "))")
     }
 
     private func statusColor(_ status: String) -> Color {

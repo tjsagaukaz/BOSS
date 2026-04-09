@@ -261,10 +261,11 @@ struct DiagnosticsView: View {
             if let caps = provider.capabilities, !caps.isEmpty {
                 HStack(spacing: 8) {
                     ForEach(caps, id: \.self) { cap in
-                        HStack(spacing: 3) {
+                        HStack(spacing: 6) {
                             Circle()
                                 .fill(Color.green.opacity(0.7))
                                 .frame(width: 5, height: 5)
+                                .accessibilityHidden(true)
                             Text(cap)
                                 .font(.system(size: 10))
                                 .foregroundColor(Color.white.opacity(0.58))
@@ -286,10 +287,11 @@ struct DiagnosticsView: View {
             default: return Color.white.opacity(0.3)
             }
         }()
-        return HStack(spacing: 4) {
+        return HStack(spacing: 6) {
             Circle()
                 .fill(color.opacity(0.8))
                 .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
             Text(status.capitalized)
                 .font(.system(size: 10))
                 .foregroundColor(color.opacity(0.9))
@@ -299,6 +301,7 @@ struct DiagnosticsView: View {
                     .foregroundColor(Color.white.opacity(0.28))
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var deployCard: some View {
@@ -309,12 +312,12 @@ struct DiagnosticsView: View {
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(Color.white.opacity(0.9))
 
-                    if let ds = vm.deployStatus {
+                    if let ds = vm.deployState.deployStatus {
                         statusBadge(ds.enabled ? "Enabled" : "Disabled")
                     }
                 }
 
-                if let ds = vm.deployStatus {
+                if let ds = vm.deployState.deployStatus {
                     HStack(spacing: 24) {
                         metric(label: "Configured", value: "\(ds.configuredCount)")
                         metric(label: "Live Deploys", value: "\(ds.liveCount)")
@@ -331,6 +334,7 @@ struct DiagnosticsView: View {
                                     Circle()
                                         .fill(info.configured ? Color.green.opacity(0.7) : Color.white.opacity(0.15))
                                         .frame(width: 6, height: 6)
+                                        .accessibilityHidden(true)
                                     Text(info.adapter)
                                         .font(.system(size: 11, weight: .medium))
                                         .foregroundColor(Color.white.opacity(info.configured ? 0.78 : 0.38))
@@ -339,6 +343,7 @@ struct DiagnosticsView: View {
                                         .font(.system(size: 10))
                                         .foregroundColor(Color.white.opacity(0.34))
                                 }
+                                .accessibilityElement(children: .combine)
                             }
                         }
                     }
@@ -407,6 +412,7 @@ struct DiagnosticsView: View {
                                     Circle()
                                         .fill(layer.active ? Color.green.opacity(0.7) : Color.white.opacity(0.15))
                                         .frame(width: 6, height: 6)
+                                        .accessibilityHidden(true)
                                     Text(layer.kind)
                                         .font(.system(size: 11, weight: .medium))
                                         .foregroundColor(Color.white.opacity(layer.active ? 0.78 : 0.32))
@@ -415,6 +421,8 @@ struct DiagnosticsView: View {
                                         .font(.system(size: 10))
                                         .foregroundColor(Color.white.opacity(0.28))
                                 }
+                                .accessibilityElement(children: .combine)
+                                .accessibilityLabel("\(layer.kind), \(layer.active ? "active" : "inactive"), \(layer.contentLength) chars")
                             }
                         }
                     }
@@ -432,10 +440,13 @@ struct DiagnosticsView: View {
             Circle()
                 .fill(active ? Color.green.opacity(0.7) : Color.white.opacity(0.15))
                 .frame(width: 6, height: 6)
+                .accessibilityHidden(true)
             Text(label)
                 .font(.system(size: 11))
                 .foregroundColor(Color.white.opacity(active ? 0.78 : 0.38))
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label), \(active ? "active" : "inactive")")
     }
 
     private func metric(label: String, value: String) -> some View {
@@ -455,36 +466,22 @@ struct DiagnosticsView: View {
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundColor(Color.white.opacity(0.28))
                 .tracking(1.0)
-            Text(value)
-                .font(.system(size: 12))
-                .foregroundColor(Color.white.opacity(0.58))
-                .textSelection(.enabled)
+            HStack(spacing: 4) {
+                Text(value)
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.white.opacity(0.58))
+                    .textSelection(.enabled)
+                CopyButton(value: value)
+            }
         }
     }
 
     private func statusBadge(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                Capsule()
-                    .fill(Color.white.opacity(0.18))
-            )
+        StatusPill(text: text.uppercased(), color: .white)
     }
 
-    private func card<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .padding(16)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.white.opacity(0.03))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
-            )
+    private func card<Content: View>(@ViewBuilder content: @escaping () -> Content) -> some View {
+        BossCard(content: content)
     }
 
     private var emptyState: some View {

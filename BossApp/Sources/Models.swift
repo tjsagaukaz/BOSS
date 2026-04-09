@@ -44,6 +44,7 @@ enum AppSurface: Equatable {
     case preview
     case workers
     case deploy
+    case settings
 }
 
 enum WorkMode: String, CaseIterable, Codable, Equatable {

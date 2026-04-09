@@ -1,4 +1,5 @@
 import SwiftUI
+import UserNotifications
 
 // MARK: - Main Layout (3-zone: sidebar | centered chat | flexible space)
 
@@ -6,23 +7,36 @@ struct ContentView: View {
     @EnvironmentObject var vm: ChatViewModel
 
     var body: some View {
-        HStack(spacing: 0) {
-            SidebarView()
-                .frame(width: 240)
+        mainLayout
+            .animation(.easeOut(duration: 0.22), value: vm.pendingPermissionCount > 0)
+            .modifier(SurfaceKeyboardShortcuts(vm: vm))
+    }
 
-            Rectangle()
-                .fill(BossColor.divider)
-                .frame(width: 1)
+    private var mainLayout: some View {
+        ZStack(alignment: .top) {
+            HStack(spacing: 0) {
+                SidebarView()
+                    .frame(width: 240)
 
-            ZStack {
-                BossColor.black.ignoresSafeArea()
-                mainSurface
-                    .frame(maxWidth: 680)
+                Rectangle()
+                    .fill(BossColor.divider)
+                    .frame(width: 1)
+
+                ZStack {
+                    BossColor.black.ignoresSafeArea()
+                    mainSurface
+                        .frame(maxWidth: 680)
+                }
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
+            .background(BossColor.black)
+            .preferredColorScheme(.dark)
+
+            if vm.pendingPermissionCount > 0 {
+                PermissionBanner()
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
-        .background(BossColor.black)
-        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder
@@ -46,7 +60,73 @@ struct ContentView: View {
             WorkersView()
         case .deploy:
             DeployView()
+        case .settings:
+            SettingsView()
         }
+    }
+}
+
+// MARK: - Permission Banner
+
+private struct PermissionBanner: View {
+    @EnvironmentObject var vm: ChatViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.orange)
+                .font(.system(size: 14, weight: .semibold))
+
+            Text(vm.pendingPermissionCount == 1
+                 ? "Approval needed — 1 pending"
+                 : "Approval needed — \(vm.pendingPermissionCount) pending")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.9))
+
+            Spacer()
+
+            Button("View") {
+                vm.selectedSurface = .chat
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.orange)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Color.orange.opacity(0.15))
+        .overlay(Rectangle().fill(Color.orange.opacity(0.25)).frame(height: 1), alignment: .bottom)
+    }
+}
+
+// MARK: - Keyboard Shortcuts
+
+private struct SurfaceKeyboardShortcuts: ViewModifier {
+    @ObservedObject var vm: ChatViewModel
+
+    private static let surfaceMap: [Character: AppSurface] = [
+        "1": .chat, "2": .memory, "3": .diagnostics,
+        "4": .jobs, "5": .review, "6": .permissions,
+        "7": .preview, "8": .workers, "9": .deploy
+    ]
+
+    func body(content: Content) -> some View {
+        content
+            .onKeyPress(.escape) {
+                if vm.selectedSurface != .chat {
+                    vm.selectedSurface = .chat
+                    return .handled
+                }
+                return .ignored
+            }
+            .onKeyPress(characters: CharacterSet(charactersIn: "123456789"), phases: .down) { press in
+                guard press.modifiers == .command,
+                      let surface = Self.surfaceMap[press.characters.first ?? " "] else {
+                    return .ignored
+                }
+                vm.selectedSurface = surface
+                return .handled
+            }
     }
 }
 
@@ -143,6 +223,17 @@ struct SidebarView: View {
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 20) {
+                    if !vm.savedSessions.isEmpty {
+                        sectionHeader("Recent")
+
+                        VStack(spacing: 1) {
+                            ForEach(vm.savedSessions, id: \.id) { session in
+                                sessionRow(session)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                    }
+
                     if !vm.projects.isEmpty {
                         sectionHeader("Projects")
 
@@ -176,6 +267,30 @@ struct SidebarView: View {
             }
 
             Spacer(minLength: 0)
+
+            // Settings gear button pinned to bottom
+            Button(action: { vm.selectedSurface = .settings }) {
+                HStack(spacing: 8) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(vm.selectedSurface == .settings ? .white : Color.white.opacity(0.45))
+                        .frame(width: 16)
+                    Text("Settings")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(vm.selectedSurface == .settings ? .white : Color.white.opacity(0.45))
+                    Spacer()
+                }
+                .padding(.vertical, 7)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(vm.selectedSurface == .settings ? Color.white.opacity(0.06) : .clear)
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 12)
         }
         .background(BossColor.surface2)
     }
@@ -224,6 +339,41 @@ struct SidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private func sessionRow(_ session: (id: String, title: String, updatedAt: Date)) -> some View {
+        let isActive = vm.sessionId == session.id
+        return Button {
+            vm.loadSession(session.id)
+        } label: {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.title)
+                        .font(.system(size: 12))
+                        .foregroundColor(isActive ? .white : Color.white.opacity(0.55))
+                        .lineLimit(1)
+                    Text(session.updatedAt, style: .relative)
+                        .font(.system(size: 10))
+                        .foregroundColor(Color.white.opacity(0.3))
+                }
+                Spacer()
+            }
+            .padding(.vertical, 5)
+            .padding(.horizontal, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(isActive ? Color.white.opacity(0.06) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(role: .destructive) {
+                vm.deleteSession(session.id)
+            } label: {
+                Label("Delete Session", systemImage: "trash")
+            }
+        }
     }
 
     private func projectRow(_ project: ProjectInfo) -> some View {
@@ -299,7 +449,7 @@ struct SidebarView: View {
     }
 
     private var sidebarMemoryItems: [MemoryRecord] {
-        guard let overview = vm.memoryOverview else { return [] }
+        guard let overview = vm.memoryState.memoryOverview else { return [] }
         var seen: Set<String> = []
         var merged: [MemoryRecord] = []
         for section in [overview.preferences, overview.userProfile, overview.recentMemories] {
@@ -330,5 +480,66 @@ struct InlineStatusBanner: View {
                 RoundedRectangle(cornerRadius: 10)
                     .stroke(BossColor.accent.opacity(0.16), lineWidth: 1)
             )
+    }
+}
+
+struct SearchBar: View {
+    @Binding var text: String
+    var placeholder: String = "Search…"
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(Color.white.opacity(0.34))
+
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(Color.white.opacity(0.88))
+
+            if !text.isEmpty {
+                Button(action: { text = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(Color.white.opacity(0.3))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+        )
+    }
+}
+
+struct CopyButton: View {
+    let value: String
+    @State private var copied = false
+
+    var body: some View {
+        Button(action: {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(value, forType: .string)
+            copied = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                copied = false
+            }
+        }) {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                .font(.system(size: 10))
+                .foregroundColor(copied ? Color.green.opacity(0.7) : Color.white.opacity(0.3))
+                .frame(width: 16, height: 16)
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.plain)
+        .help(copied ? "Copied" : "Copy to clipboard")
     }
 }

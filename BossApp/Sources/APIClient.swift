@@ -2,9 +2,23 @@ import Foundation
 
 // MARK: - SSE Event Parser
 
-struct SSEEvent: Sendable {
+// [String: Any] holds the raw JSON values — @unchecked Sendable is safe because
+// SSEEvent is consumed only on @MainActor after being yielded from the stream.
+struct SSEEvent: @unchecked Sendable {
     var type: String = ""
-    var data: [String: String] = [:]
+    var data: [String: Any] = [:]
+
+    /// Returns the value for `key` as a String; converts NSNumber to its string
+    /// representation so callers written against the old [String: String] API
+    /// continue to work without changes.
+    func stringValue(_ key: String) -> String? {
+        switch data[key] {
+        case let s as String: return s
+        case let n as NSNumber: return n.stringValue
+        case nil: return nil
+        default: return nil
+        }
+    }
 }
 
 enum APIError: LocalizedError {
@@ -666,44 +680,87 @@ final class APIClient: Sendable {
                         return
                     }
 
+                    let maxBufferBytes = 1_048_576 // 1 MB
                     var rawBuffer = Data()
+
                     for try await byte in stream {
                         rawBuffer.append(byte)
 
+                        // Guard against unbounded growth from malformed streams.
+                        if rawBuffer.count > maxBufferBytes {
+                            print("[SSE] Warning: buffer exceeded \(maxBufferBytes) bytes without event boundary — discarding")
+                            var errEvt = SSEEvent()
+                            errEvt.type = "error"
+                            errEvt.data = ["message": "SSE buffer overflow: stream may be malformed"]
+                            continuation.yield(errEvt)
+                            rawBuffer.removeAll(keepingCapacity: true)
+                            continue
+                        }
+
+                        // SSE events are terminated by a blank line (\n\n).
                         guard rawBuffer.count >= 2,
                               rawBuffer.suffix(2) == Data([0x0A, 0x0A]) else { continue }
 
                         guard let bufferStr = String(data: rawBuffer, encoding: .utf8) else {
+                            rawBuffer.removeAll(keepingCapacity: true)
+                            continue
+                        }
+                        rawBuffer.removeAll(keepingCapacity: true)
+
+                        // --- Parse the SSE event block per the SSE spec ---
+                        // Each line is "field: value"; the data field may span multiple lines.
+                        // Concatenate multiple "data: …" lines with \n between them.
+                        var explicitEventType: String? = nil
+                        var dataLines: [String] = []
+
+                        for line in bufferStr.components(separatedBy: "\n") {
+                            if line.hasPrefix("event: ") {
+                                explicitEventType = String(line.dropFirst(7))
+                            } else if line.hasPrefix("data: ") {
+                                dataLines.append(String(line.dropFirst(6)))
+                            }
+                            // id:, retry:, and empty lines are intentionally ignored.
+                        }
+
+                        guard !dataLines.isEmpty else { continue }
+
+                        let joinedData = dataLines.joined(separator: "\n")
+                        guard let jsonData = joinedData.data(using: .utf8) else { continue }
+
+                        let parsedDict: [String: Any]
+                        do {
+                            guard let dict = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                                print("[SSE] Warning: JSON root is not a dictionary — raw: \(joinedData.prefix(200))")
+                                continue
+                            }
+                            parsedDict = dict
+                        } catch {
+                            print("[SSE] Warning: Malformed JSON in SSE data: \(error) — raw: \(joinedData.prefix(200))")
+                            var errEvt = SSEEvent()
+                            errEvt.type = "error"
+                            errEvt.data = ["message": "Malformed SSE event: \(error.localizedDescription)"]
+                            continuation.yield(errEvt)
                             continue
                         }
 
-                        let lines = bufferStr.split(separator: "\n", omittingEmptySubsequences: false)
+                        // Resolve event type: explicit "event:" line wins, then JSON "type" field.
+                        let resolvedType: String
+                        if let explicit = explicitEventType, !explicit.isEmpty {
+                            resolvedType = explicit
+                        } else if let typeInData = parsedDict["type"] as? String, !typeInData.isEmpty {
+                            resolvedType = typeInData
+                        } else {
+                            print("[SSE] Warning: Event has no type — data keys: \(Array(parsedDict.keys))")
+                            continue
+                        }
+
                         var event = SSEEvent()
+                        event.type = resolvedType
+                        event.data = parsedDict
 
-                        for line in lines {
-                            let lineStr = String(line)
-                            if lineStr.hasPrefix("data: ") {
-                                let jsonStr = String(lineStr.dropFirst(6))
-                                if let jsonData = jsonStr.data(using: .utf8),
-                                   let dict = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                                    var stringDict: [String: String] = [:]
-                                    for (key, value) in dict {
-                                        stringDict[key] = "\(value)"
-                                    }
-                                    event.data = stringDict
-                                    event.type = stringDict["type"] ?? ""
-                                }
-                            } else if lineStr.hasPrefix("event: ") {
-                                event.type = String(lineStr.dropFirst(7))
-                            }
-                        }
-
-                        if !event.type.isEmpty {
-                            let isDone = event.type == "done"
-                            continuation.yield(event)
-                            if isDone { break }
-                        }
-                        rawBuffer.removeAll(keepingCapacity: true)
+                        let isDone = resolvedType == "done"
+                        continuation.yield(event)
+                        if isDone { break }
                     }
                 } catch {
                     var evt = SSEEvent()

@@ -245,28 +245,11 @@ struct PreviewView: View {
     }
 
     private func statusBadge(_ text: String) -> some View {
-        Text(text.uppercased())
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                Capsule()
-                    .fill(Color.white.opacity(0.18))
-            )
+        StatusPill(text: text.uppercased(), color: .white)
     }
 
-    private func card<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .padding(16)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.white.opacity(0.03))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
-            )
+    private func card<Content: View>(@ViewBuilder content: @escaping () -> Content) -> some View {
+        BossCard(content: content)
     }
 
     private var emptyState: some View {

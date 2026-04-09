@@ -19,60 +19,24 @@ struct PermissionPromptView: View {
                 .foregroundColor(Color.white.opacity(0.42))
 
             HStack(spacing: 8) {
-                decisionButton(
-                    title: "Allow Once",
-                    foreground: .white,
-                    background: Color.white.opacity(0.14)
-                ) {
+                BossSecondaryButton(title: "Allow Once") {
                     onDecision(.allowOnce)
                 }
 
-                decisionButton(
-                    title: "Always Allow",
-                    foreground: Color.white.opacity(0.82),
-                    background: Color.white.opacity(0.08)
-                ) {
+                BossSecondaryButton(title: "Always Allow") {
                     onDecision(.alwaysAllow)
                 }
 
-                decisionButton(
-                    title: "Deny",
-                    foreground: Color.white.opacity(0.55),
-                    background: Color.white.opacity(0.04)
-                ) {
+                BossTertiaryButton(title: "Deny") {
                     onDecision(.deny)
                 }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color.white.opacity(0.045))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
-    }
-
-    private func decisionButton(
-        title: String,
-        foreground: Color,
-        background: Color,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(foreground)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(background)
-                )
-        }
-        .buttonStyle(.plain)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.white.opacity(0.045)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.06), lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Permission request: \(request.description)")
     }
 }

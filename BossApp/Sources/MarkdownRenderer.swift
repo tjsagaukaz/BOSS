@@ -16,6 +16,17 @@ struct MarkdownNode: Identifiable, Hashable {
     let block: MarkdownBlock
 }
 
+// MARK: - Inline Spans
+
+enum InlineSpan {
+    case text(String)
+    case bold(String)
+    case italic(String)
+    case code(String)
+    case link(text: String, url: String)
+    case boldItalic(String)
+}
+
 // MARK: - Recursive Parser
 
 enum MarkdownParser {
@@ -254,6 +265,68 @@ enum MarkdownParser {
         }
         return nil
     }
+
+    // MARK: Inline Parsing
+
+    static func parseInline(_ text: String) -> [InlineSpan] {
+        guard !text.isEmpty else { return [] }
+
+        let pattern = [
+            "`([^`]+)`",
+            "\\[([^\\]]+)\\]\\(([^)]+)\\)",
+            "\\*\\*\\*(.+?)\\*\\*\\*",
+            "(?<!\\w)___(.+?)___(?!\\w)",
+            "\\*\\*(.+?)\\*\\*",
+            "(?<!\\w)__(.+?)__(?!\\w)",
+            "\\*(.+?)\\*",
+            "(?<!\\w)_(.+?)_(?!\\w)",
+        ].joined(separator: "|")
+
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return [.text(text)]
+        }
+
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        var spans: [InlineSpan] = []
+        var cursor = 0
+
+        for match in matches {
+            let start = match.range.location
+            if start > cursor {
+                spans.append(.text(ns.substring(with: NSRange(location: cursor, length: start - cursor))))
+            }
+
+            if match.range(at: 1).location != NSNotFound {
+                spans.append(.code(ns.substring(with: match.range(at: 1))))
+            } else if match.range(at: 2).location != NSNotFound {
+                spans.append(.link(
+                    text: ns.substring(with: match.range(at: 2)),
+                    url: ns.substring(with: match.range(at: 3))
+                ))
+            } else if match.range(at: 4).location != NSNotFound {
+                spans.append(.boldItalic(ns.substring(with: match.range(at: 4))))
+            } else if match.range(at: 5).location != NSNotFound {
+                spans.append(.boldItalic(ns.substring(with: match.range(at: 5))))
+            } else if match.range(at: 6).location != NSNotFound {
+                spans.append(.bold(ns.substring(with: match.range(at: 6))))
+            } else if match.range(at: 7).location != NSNotFound {
+                spans.append(.bold(ns.substring(with: match.range(at: 7))))
+            } else if match.range(at: 8).location != NSNotFound {
+                spans.append(.italic(ns.substring(with: match.range(at: 8))))
+            } else if match.range(at: 9).location != NSNotFound {
+                spans.append(.italic(ns.substring(with: match.range(at: 9))))
+            }
+
+            cursor = match.range.location + match.range.length
+        }
+
+        if cursor < ns.length {
+            spans.append(.text(ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))))
+        }
+
+        return spans.isEmpty ? [.text(text)] : spans
+    }
 }
 
 // MARK: - Typography
@@ -265,6 +338,170 @@ enum MDTypo {
     static let bodySize: CGFloat = 15
     static let lineGap: CGFloat = 7
     static let tracking: CGFloat = -0.15
+}
+
+// MARK: - Syntax Highlighting
+
+enum SyntaxHighlighter {
+    enum TokenKind { case keyword, string, comment, number, plain }
+
+    private static let keywordSets: [String: Set<String>] = [
+        "swift": ["func", "let", "var", "class", "struct", "enum", "protocol", "import", "return",
+                  "if", "else", "for", "while", "guard", "switch", "case", "break", "continue",
+                  "self", "true", "false", "nil", "private", "public", "static", "override",
+                  "init", "throws", "throw", "try", "catch", "await", "async", "some", "any",
+                  "where", "in", "extension", "typealias", "defer", "do", "repeat"],
+        "python": ["def", "class", "import", "from", "return", "if", "elif", "else", "for",
+                   "while", "with", "as", "try", "except", "finally", "raise", "pass", "break",
+                   "continue", "and", "or", "not", "in", "is", "None", "True", "False",
+                   "lambda", "yield", "global", "nonlocal", "async", "await", "self"],
+        "javascript": ["function", "const", "let", "var", "class", "import", "export", "default",
+                       "return", "if", "else", "for", "while", "do", "switch", "case", "break",
+                       "continue", "new", "this", "typeof", "instanceof", "throw", "try", "catch",
+                       "finally", "async", "await", "true", "false", "null", "undefined"],
+        "typescript": ["function", "const", "let", "var", "class", "interface", "type", "import",
+                       "export", "default", "return", "if", "else", "for", "while", "do", "switch",
+                       "case", "break", "continue", "new", "this", "typeof", "instanceof", "throw",
+                       "try", "catch", "finally", "async", "await", "true", "false", "null",
+                       "undefined", "enum", "implements", "abstract", "as", "keyof", "readonly"],
+        "rust": ["fn", "let", "mut", "const", "static", "struct", "enum", "impl", "trait", "type",
+                "use", "mod", "pub", "crate", "self", "super", "return", "if", "else", "for",
+                "while", "loop", "match", "break", "continue", "where", "as", "in", "ref",
+                "move", "async", "await", "unsafe", "true", "false"],
+        "go": ["func", "var", "const", "type", "struct", "interface", "import", "package", "return",
+              "if", "else", "for", "range", "switch", "case", "break", "continue", "select",
+              "chan", "go", "defer", "map", "make", "new", "true", "false", "nil", "default"],
+        "bash": ["if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac",
+                "function", "return", "in", "echo", "exit", "export", "source", "local", "set",
+                "unset", "true", "false"],
+    ]
+
+    private static let hashCommentLangs: Set<String> = ["python", "bash", "ruby", "r"]
+    private static let slashCommentLangs: Set<String> = ["swift", "javascript", "typescript", "rust", "go", "java", "c", "cpp"]
+
+    static func highlightedText(_ code: String, language: String?) -> Text {
+        let tokens = tokenize(code, language: language)
+        return tokens.reduce(Text("")) { result, token in
+            result + styledText(token)
+        }
+    }
+
+    private static func styledText(_ token: (kind: TokenKind, text: String)) -> Text {
+        let color: Color
+        switch token.kind {
+        case .keyword:  color = Color(red: 0.78, green: 0.46, blue: 0.93)
+        case .string:   color = Color(red: 0.58, green: 0.84, blue: 0.44)
+        case .comment:  color = Color.white.opacity(0.35)
+        case .number:   color = Color(red: 0.85, green: 0.7, blue: 0.35)
+        case .plain:    color = Color.white.opacity(0.82)
+        }
+        return Text(token.text).foregroundColor(color)
+    }
+
+    private static func tokenize(_ code: String, language: String?) -> [(kind: TokenKind, text: String)] {
+        let lang = language?.lowercased() ?? ""
+        guard let keywords = keywordSets[lang] else {
+            return [(.plain, code)]
+        }
+
+        var patterns: [String] = []
+        if slashCommentLangs.contains(lang) { patterns.append("//[^\n]*") }
+        if hashCommentLangs.contains(lang) { patterns.append("#[^\n]*") }
+        patterns.append("\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*'")
+        patterns.append("\\b\\d+(?:\\.\\d+)?\\b")
+        patterns.append("\\b[A-Za-z_][A-Za-z0-9_]*\\b")
+
+        guard let regex = try? NSRegularExpression(pattern: patterns.joined(separator: "|")) else {
+            return [(.plain, code)]
+        }
+
+        let ns = code as NSString
+        let matches = regex.matches(in: code, range: NSRange(location: 0, length: ns.length))
+        var tokens: [(kind: TokenKind, text: String)] = []
+        var cursor = 0
+
+        for match in matches {
+            let r = match.range
+            if r.location > cursor {
+                tokens.append((.plain, ns.substring(with: NSRange(location: cursor, length: r.location - cursor))))
+            }
+            let t = ns.substring(with: r)
+            let kind: TokenKind
+            if t.hasPrefix("//") || t.hasPrefix("#") {
+                kind = .comment
+            } else if t.hasPrefix("\"") || t.hasPrefix("\'") {
+                kind = .string
+            } else if t.first?.isNumber == true {
+                kind = .number
+            } else if keywords.contains(t) {
+                kind = .keyword
+            } else {
+                kind = .plain
+            }
+            tokens.append((kind: kind, text: t))
+            cursor = r.location + r.length
+        }
+
+        if cursor < ns.length {
+            tokens.append((.plain, ns.substring(with: NSRange(location: cursor, length: ns.length - cursor))))
+        }
+
+        return tokens
+    }
+}
+
+// MARK: - Inline Text Rendering
+
+struct InlineTextView: View {
+    let spans: [InlineSpan]
+
+    init(_ text: String) {
+        self.spans = MarkdownParser.parseInline(text)
+    }
+
+    init(spans: [InlineSpan]) {
+        self.spans = spans
+    }
+
+    var body: some View {
+        textContent
+            .font(.system(size: MDTypo.bodySize))
+            .tracking(MDTypo.tracking)
+            .lineSpacing(MDTypo.lineGap)
+            .foregroundColor(MDTypo.primaryText)
+            .textSelection(.enabled)
+    }
+
+    var textContent: Text {
+        spans.reduce(Text("")) { result, span in
+            result + renderSpan(span)
+        }
+    }
+
+    private func renderSpan(_ span: InlineSpan) -> Text {
+        switch span {
+        case .text(let str):
+            return Text(str)
+        case .bold(let str):
+            return Text(str).bold()
+        case .italic(let str):
+            return Text(str).italic()
+        case .boldItalic(let str):
+            return Text(str).bold().italic()
+        case .code(let str):
+            return Text(str)
+                .font(.system(size: MDTypo.bodySize - 1, design: .monospaced))
+                .foregroundColor(Color(red: 0.92, green: 0.58, blue: 0.46))
+        case .link(let text, let url):
+            var attrStr = AttributedString(text)
+            attrStr.foregroundColor = .init(red: 0.4, green: 0.7, blue: 1.0)
+            attrStr.underlineStyle = .single
+            if let linkURL = URL(string: url) {
+                attrStr.link = linkURL
+            }
+            return Text(attrStr)
+        }
+    }
 }
 
 // MARK: - Recursive Renderer
@@ -323,7 +560,7 @@ private struct MarkdownNodeView: View {
             }
         }()
 
-        return Text(inlineMarkdown(text))
+        return InlineTextView(text).textContent
             .font(.system(size: style.0, weight: style.1))
             .tracking(-0.2)
             .foregroundColor(MDTypo.primaryText)
@@ -334,7 +571,7 @@ private struct MarkdownNodeView: View {
     private func paragraphView(_ text: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(Array(text.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                Text(inlineMarkdown(line))
+                InlineTextView(line).textContent
                     .font(.system(size: MDTypo.bodySize))
                     .tracking(MDTypo.tracking)
                     .lineSpacing(MDTypo.lineGap)
@@ -380,9 +617,8 @@ private struct MarkdownNodeView: View {
             .background(Color.white.opacity(0.025))
 
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
+                SyntaxHighlighter.highlightedText(code, language: language)
                     .font(.system(size: 13, design: .monospaced))
-                    .foregroundColor(Color.white.opacity(0.82))
                     .lineSpacing(4)
                     .textSelection(.enabled)
                     .padding(.horizontal, 14)
@@ -430,13 +666,6 @@ private struct MarkdownNodeView: View {
             }
         }
         .padding(.leading, 4)
-    }
-
-    private func inlineMarkdown(_ text: String) -> AttributedString {
-        (try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(text)
     }
 
     private func checkboxState(in nodes: [MarkdownNode]) -> Bool? {

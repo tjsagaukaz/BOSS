@@ -10,17 +10,17 @@ struct ReviewView: View {
                 header
                     .padding(.top, 80)
 
-                if let message = vm.reviewRefreshError {
+                if let message = vm.reviewState.reviewRefreshError {
                     InlineStatusBanner(message: message)
                 }
 
                 controlsCard
 
-                if !vm.reviewHistory.isEmpty {
+                if !vm.reviewState.reviewHistory.isEmpty {
                     historySection
                 }
 
-                if let run = vm.selectedReviewRun {
+                if let run = vm.reviewState.selectedReviewRun {
                     reviewResultSection(run)
                 } else {
                     emptyState
@@ -31,7 +31,7 @@ struct ReviewView: View {
             .padding(.bottom, 32)
         }
         .task {
-            await vm.refreshReviewSurface()
+            await vm.reviewState.refresh(fallbackProjectPath: vm.selectedProjectPath)
         }
     }
 
@@ -62,12 +62,10 @@ struct ReviewView: View {
 
                 Spacer()
 
-                Button(action: { Task { await vm.refreshReviewSurface() } }) {
-                    Text("Refresh")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.white.opacity(0.64))
+                BossTertiaryButton(title: "Refresh") {
+                    Task { await vm.reviewState.refresh(fallbackProjectPath: vm.selectedProjectPath) }
                 }
-                .buttonStyle(.plain)
+                .help("Refresh")
             }
 
             if !vm.projects.isEmpty {
@@ -78,10 +76,10 @@ struct ReviewView: View {
                         .tracking(1.0)
 
                     Picker("Project", selection: Binding<String>(
-                        get: { vm.selectedReviewProjectPath ?? (vm.reviewCapabilities?.projectPath ?? vm.projects.first?.path ?? "") },
+                        get: { vm.reviewState.selectedReviewProjectPath ?? (vm.reviewState.reviewCapabilities?.projectPath ?? vm.projects.first?.path ?? "") },
                         set: { newValue in
-                            vm.selectedReviewProjectPath = newValue.isEmpty ? nil : newValue
-                            Task { await vm.refreshReviewSurface() }
+                            vm.reviewState.selectedReviewProjectPath = newValue.isEmpty ? nil : newValue
+                            Task { await vm.reviewState.refresh(fallbackProjectPath: vm.selectedProjectPath) }
                         }
                     )) {
                         ForEach(vm.projects) { project in
@@ -99,8 +97,8 @@ struct ReviewView: View {
                     .tracking(1.0)
 
                 Picker("Review target", selection: Binding<ReviewTargetKind>(
-                    get: { vm.selectedReviewTarget },
-                    set: { vm.selectReviewTarget($0) }
+                    get: { vm.reviewState.selectedReviewTarget },
+                    set: { vm.reviewState.selectTarget($0) }
                 )) {
                     ForEach(availableTargets, id: \.rawValue) { target in
                         Text(target.label).tag(target)
@@ -109,11 +107,11 @@ struct ReviewView: View {
                 .pickerStyle(.menu)
             }
 
-            if let capabilities = vm.reviewCapabilities {
+            if let capabilities = vm.reviewState.reviewCapabilities {
                 capabilitiesCard(capabilities)
             }
 
-            if vm.selectedReviewTarget == .branchDiff {
+            if vm.reviewState.selectedReviewTarget == .branchDiff {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Base Ref")
@@ -121,7 +119,7 @@ struct ReviewView: View {
                             .foregroundColor(Color.white.opacity(0.32))
                             .tracking(1.0)
 
-                        TextField("main", text: $vm.reviewBaseRef)
+                        TextField("main", text: $vm.reviewState.reviewBaseRef)
                             .textFieldStyle(.plain)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
@@ -137,7 +135,7 @@ struct ReviewView: View {
                             .foregroundColor(Color.white.opacity(0.32))
                             .tracking(1.0)
 
-                        TextField(vm.reviewCapabilities?.currentBranch ?? "feature", text: $vm.reviewHeadRef)
+                        TextField(vm.reviewState.reviewCapabilities?.currentBranch ?? "feature", text: $vm.reviewState.reviewHeadRef)
                             .textFieldStyle(.plain)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
@@ -149,7 +147,7 @@ struct ReviewView: View {
                 }
             }
 
-            if vm.selectedReviewTarget == .files {
+            if vm.reviewState.selectedReviewTarget == .files {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Files")
@@ -159,15 +157,10 @@ struct ReviewView: View {
 
                         Spacer()
 
-                        Button(action: pickFiles) {
-                            Text("Choose Files")
-                                .font(.system(size: 12))
-                                .foregroundColor(Color.white.opacity(0.64))
-                        }
-                        .buttonStyle(.plain)
+                        BossTertiaryButton(title: "Choose Files") { pickFiles() }
                     }
 
-                    TextEditor(text: $vm.reviewFilePathsText)
+                    TextEditor(text: $vm.reviewState.reviewFilePathsText)
                         .font(.system(size: 12))
                         .foregroundColor(Color.white.opacity(0.82))
                         .scrollContentBackground(.hidden)
@@ -181,41 +174,19 @@ struct ReviewView: View {
             }
 
             HStack(spacing: 12) {
-                Button(action: { vm.runReview() }) {
-                    HStack(spacing: 8) {
-                        if vm.isRunningReview {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                        }
-                        Text(vm.isRunningReview ? "Reviewing" : "Run Review")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.white)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        Capsule()
-                            .fill(BossColor.accent)
-                    )
+                BossPrimaryButton(title: vm.reviewState.isRunningReview ? "Reviewing" : "Run Review") {
+                    vm.reviewState.runReview()
                 }
-                .buttonStyle(.plain)
-                .disabled(vm.isRunningReview)
+                .disabled(vm.reviewState.isRunningReview)
 
                 Text(runButtonHint)
                     .font(.system(size: 11))
                     .foregroundColor(Color.white.opacity(0.34))
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     private func capabilitiesCard(_ capabilities: ReviewCapabilitiesInfo) -> some View {
@@ -257,9 +228,9 @@ struct ReviewView: View {
                 .padding(.bottom, 10)
 
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(vm.reviewHistory.prefix(8).enumerated()), id: \.element.id) { index, run in
+                ForEach(Array(vm.reviewState.reviewHistory.prefix(8).enumerated()), id: \.element.id) { index, run in
                     historyRow(run)
-                    if index < min(vm.reviewHistory.count, 8) - 1 {
+                    if index < min(vm.reviewState.reviewHistory.count, 8) - 1 {
                         Rectangle()
                             .fill(Color.white.opacity(0.05))
                             .frame(height: 1)
@@ -270,9 +241,9 @@ struct ReviewView: View {
     }
 
     private func historyRow(_ run: ReviewRunInfo) -> some View {
-        let isSelected = vm.selectedReviewRun?.reviewId == run.reviewId
+        let isSelected = vm.reviewState.selectedReviewRun?.reviewId == run.reviewId
         return Button {
-            vm.selectReviewRun(run)
+            vm.reviewState.selectRun(run)
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -464,7 +435,7 @@ struct ReviewView: View {
 
     private var availableTargets: [ReviewTargetKind] {
         var targets: [ReviewTargetKind] = [.auto]
-        if let capabilities = vm.reviewCapabilities {
+        if let capabilities = vm.reviewState.reviewCapabilities {
             targets.append(contentsOf: capabilities.availableTargets.compactMap(ReviewTargetKind.init(rawValue:)))
         } else {
             targets.append(contentsOf: [.workingTree, .staged, .branchDiff, .files, .projectSummary])
@@ -474,7 +445,7 @@ struct ReviewView: View {
     }
 
     private var runButtonHint: String {
-        switch vm.selectedReviewTarget {
+        switch vm.reviewState.selectedReviewTarget {
         case .branchDiff:
             return "Base and head refs are required."
         case .files:
@@ -503,7 +474,7 @@ struct ReviewView: View {
 
         if panel.runModal() == .OK {
             let paths = panel.urls.map(\.path)
-            vm.reviewFilePathsText = paths.joined(separator: "\n")
+            vm.reviewState.reviewFilePathsText = paths.joined(separator: "\n")
         }
     }
 

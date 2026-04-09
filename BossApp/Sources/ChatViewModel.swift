@@ -1,4 +1,6 @@
+import Combine
 import SwiftUI
+import UserNotifications
 
 // MARK: - Chat ViewModel
 
@@ -20,49 +22,79 @@ final class ChatViewModel: ObservableObject {
     // Sidebar data
     @Published var projects: [ProjectInfo] = []
     @Published var facts: [FactInfo] = []
-    @Published var memoryStats: MemoryStats?
-    @Published var memoryOverview: MemoryOverview?
     @Published var systemStatus: SystemStatusInfo?
-    @Published var jobs: [BackgroundJobInfo] = []
-    @Published var selectedJob: BackgroundJobInfo?
-    @Published var selectedJobLog: BackgroundJobLogTailInfo?
-    @Published var reviewCapabilities: ReviewCapabilitiesInfo?
-    @Published var reviewHistory: [ReviewRunInfo] = []
-    @Published var selectedReviewRun: ReviewRunInfo?
-    @Published var selectedReviewProjectPath: String?
-    @Published var selectedReviewTarget: ReviewTargetKind = .auto
-    @Published var reviewBaseRef: String = ""
-    @Published var reviewHeadRef: String = ""
-    @Published var reviewFilePathsText: String = ""
-    @Published var isLaunchingBackgroundJob: Bool = false
-    @Published var isRunningReview: Bool = false
     @Published var permissions: [PermissionEntry] = []
     @Published var sidebarRefreshError: String?
-    @Published var memoryRefreshError: String?
     @Published var diagnosticsRefreshError: String?
     @Published var promptDiagnostics: PromptDiagnosticsInfo?
-    @Published var jobsRefreshError: String?
-    @Published var reviewRefreshError: String?
     @Published var permissionsRefreshError: String?
     @Published var previewStatus: PreviewStatusInfo?
     @Published var previewRefreshError: String?
-    @Published var workPlans: [WorkPlanInfo] = []
-    @Published var selectedWorkPlan: WorkPlanInfo?
-    @Published var workersRefreshError: String?
-    @Published var deployStatus: DeployStatusInfo?
-    @Published var deployments: [DeploymentInfo] = []
-    @Published var selectedDeployment: DeploymentInfo?
-    @Published var deployRefreshError: String?
     @Published var startupIssue: String?
+    @Published var savedSessions: [(id: String, title: String, updatedAt: Date)] = []
+
+    // Sub-state modules
+    var jobsState = JobsState()
+    var reviewState = ReviewState()
+    var workersState = WorkersState()
+    var deployState = DeployState()
+    var memoryState = MemoryState()
 
     private let api = APIClient.shared
+    private var cancellables = Set<AnyCancellable>()
+
+    // Tracks approval IDs for which we've already sent a macOS notification.
+    private var sentNotificationIds: Set<String> = []
+
+    private var tokenBuffer: String = ""
+    private var flushTask: Task<Void, Never>? = nil
+    private var activeStreamMessageIndex: Int? = nil
 
     init() {
-        messages.append(ChatMessage(role: .system, content: "Boss Assistant ready. Ask me anything."))
+        // Read stored preferences
+        if let storedMode = UserDefaults.standard.string(forKey: "bossDefaultMode"),
+           let mode = WorkMode(rawValue: storedMode) {
+            selectedMode = mode
+        }
+        if let storedStyle = UserDefaults.standard.string(forKey: "bossDefaultExecStyle"),
+           let style = ExecutionStyle(rawValue: storedStyle) {
+            selectedExecutionStyle = style
+        }
+
+        let store = SessionStore.shared
+        let recent = store.listSessions()
+        if let latest = recent.first, let restored = store.load(sessionId: latest.id) {
+            sessionId = latest.id
+            messages = restored
+        } else {
+            messages.append(ChatMessage(role: .system, content: "Boss Assistant ready. Ask me anything."))
+        }
+        savedSessions = recent
+
+        // Forward sub-state objectWillChange to this view model
+        jobsState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        reviewState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        workersState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        deployState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        memoryState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+
+        // Wire memory mutation callback to refresh sidebar
+        memoryState.onMemoryChanged = { [weak self] in
+            await self?.refreshSidebar()
+        }
+
         Task { await bootstrapRuntimeAndRefresh() }
     }
 
     // MARK: - Send message
+
+    func retryLastMessage() {
+        guard !isLoading else { return }
+        guard let lastUserMsg = messages.last(where: { $0.role == .user }) else { return }
+        inputText = lastUserMsg.content
+        draftAttachments = lastUserMsg.attachments
+        send()
+    }
 
     func send() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -146,6 +178,17 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private func flushTokenBuffer() {
+        guard !tokenBuffer.isEmpty, let idx = activeStreamMessageIndex, idx < messages.count else {
+            tokenBuffer = ""
+            flushTask = nil
+            return
+        }
+        messages[idx].content += tokenBuffer
+        tokenBuffer = ""
+        flushTask = nil
+    }
+
     private func consumeStream(_ stream: AsyncStream<SSEEvent>, for messageId: UUID) async {
         var sawDone = false
 
@@ -155,6 +198,11 @@ final class ChatViewModel: ObservableObject {
             }
         }
 
+        flushTask?.cancel()
+        flushTask = nil
+        flushTokenBuffer()
+        activeStreamMessageIndex = nil
+
         if let messageIndex = messageIndex(for: messageId) {
             messages[messageIndex].isStreaming = false
         }
@@ -162,6 +210,14 @@ final class ChatViewModel: ObservableObject {
         refreshPermissionCount()
         isLoading = false
         activeToolName = nil
+
+        // Persist after each completed stream.
+        let sid = sessionId
+        let msgs = messages
+        Task.detached(priority: .background) {
+            SessionStore.shared.save(sessionId: sid, messages: msgs)
+        }
+        savedSessions = SessionStore.shared.listSessions()
 
         if sawDone {
             await refreshSidebar()
@@ -175,31 +231,39 @@ final class ChatViewModel: ObservableObject {
 
         switch event.type {
         case "session":
-            if let sid = event.data["session_id"] {
+            if let sid = event.stringValue("session_id") {
                 sessionId = sid
             }
 
         case "agent":
-            if let name = event.data["name"] {
+            if let name = event.stringValue("name") {
                 currentAgent = name
                 messages[messageIndex].agent = name
                 activeToolName = nil
             }
 
         case "text":
-            if let content = event.data["content"] {
-                messages[messageIndex].content += content
+            if let content = event.stringValue("content") {
+                tokenBuffer += content
+                activeStreamMessageIndex = messageIndex
+                if flushTask == nil {
+                    flushTask = Task { [weak self] in
+                        guard let self else { return }
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        self.flushTokenBuffer()
+                    }
+                }
             }
 
         case "thinking":
-            if let content = event.data["content"] {
+            if let content = event.stringValue("content") {
                 messages[messageIndex].thinkingContent = content
             }
 
         case "handoff":
             markLatestTransferStepSuccessful(in: messageIndex)
-            let from = event.data["from"] ?? "?"
-            let to = event.data["to"] ?? "?"
+            let from = event.stringValue("from") ?? "?"
+            let to = event.stringValue("to") ?? "?"
             let info = AgentInfo.forName(to)
             messages[messageIndex].executionSteps.append(
                 ExecutionStep(
@@ -213,12 +277,12 @@ final class ChatViewModel: ObservableObject {
             )
 
         case "tool_call":
-            let callId = event.data["call_id"] ?? UUID().uuidString
-            let name = event.data["name"] ?? "tool"
-            let title = event.data["title"] ?? name.replacingOccurrences(of: "_", with: " ").capitalized
-            let description = event.data["description"] ?? title
-            let arguments = event.data["arguments"] ?? ""
-            let executionType = event.data["execution_type"].flatMap(ExecutionType.init(rawValue:))
+            let callId = event.stringValue("call_id") ?? UUID().uuidString
+            let name = event.stringValue("name") ?? "tool"
+            let title = event.stringValue("title") ?? name.replacingOccurrences(of: "_", with: " ").capitalized
+            let description = event.stringValue("description") ?? title
+            let arguments = event.stringValue("arguments") ?? ""
+            let executionType = event.stringValue("execution_type").flatMap(ExecutionType.init(rawValue:))
             let state: ToolState = executionType == .plan
                 ? .running
                 : executionType?.requiresPermission == true ? .pending : .running
@@ -241,8 +305,8 @@ final class ChatViewModel: ObservableObject {
             activeToolName = title
 
         case "tool_result":
-            let callId = event.data["call_id"] ?? ""
-            let output = event.data["output"]
+            let callId = event.stringValue("call_id") ?? ""
+            let output = event.stringValue("output")
             if let stepIndex = executionStepIndex(in: messageIndex, stepId: callId)
                 ?? lastToolStepIndex(in: messageIndex) {
                 messages[messageIndex].executionSteps[stepIndex].output = output
@@ -253,13 +317,13 @@ final class ChatViewModel: ObservableObject {
             activeToolName = nil
 
         case "permission_request":
-            let runId = event.data["run_id"] ?? ""
-            let approvalId = event.data["approval_id"] ?? UUID().uuidString
-            let name = event.data["tool"] ?? "tool"
-            let title = event.data["title"] ?? name.replacingOccurrences(of: "_", with: " ").capitalized
-            let description = event.data["description"] ?? title
-            let executionType = event.data["execution_type"].flatMap(ExecutionType.init(rawValue:)) ?? .run
-            let scopeLabel = event.data["scope_label"] ?? "Any"
+            let runId = event.stringValue("run_id") ?? ""
+            let approvalId = event.stringValue("approval_id") ?? UUID().uuidString
+            let name = event.stringValue("tool") ?? "tool"
+            let title = event.stringValue("title") ?? name.replacingOccurrences(of: "_", with: " ").capitalized
+            let description = event.stringValue("description") ?? title
+            let executionType = event.stringValue("execution_type").flatMap(ExecutionType.init(rawValue:)) ?? .run
+            let scopeLabel = event.stringValue("scope_label") ?? "Any"
             let request = PermissionRequest(
                 runId: runId,
                 approvalId: approvalId,
@@ -293,10 +357,11 @@ final class ChatViewModel: ObservableObject {
 
             messages[messageIndex].isStreaming = false
             refreshPermissionCount()
+            sendPermissionNotificationIfNeeded(request: request)
 
         case "permission_result":
-            guard let approvalId = event.data["approval_id"],
-                  let decisionRaw = event.data["decision"],
+            guard let approvalId = event.stringValue("approval_id"),
+                  let decisionRaw = event.stringValue("decision"),
                   let decision = PermissionDecision(rawValue: decisionRaw),
                   let stepIndex = executionStepIndex(in: messageIndex, stepId: approvalId) else {
                 break
@@ -308,7 +373,7 @@ final class ChatViewModel: ObservableObject {
             refreshPermissionCount()
 
         case "error":
-            let message = event.data["message"] ?? "Unknown error"
+            let message = event.stringValue("message") ?? "Unknown error"
             if messages[messageIndex].content.isEmpty {
                 messages[messageIndex].content = message
             }
@@ -323,16 +388,25 @@ final class ChatViewModel: ObservableObject {
             return true
 
         case "loop_status":
-            let loopId = event.data["loop_id"] ?? ""
-            let status = event.data["status"] ?? ""
-            let stopReason = event.data["stop_reason"]
-            let attempt = event.data["attempt"].flatMap { Int($0) }
-            let task = event.data["task"]
+            let loopId = event.stringValue("loop_id") ?? ""
+            let status = event.stringValue("status") ?? ""
+            let stopReason = event.stringValue("stop_reason")
+            // attempt may arrive as Int (new parser) or String (fallback)
+            let attempt = (event.data["attempt"] as? Int) ?? event.stringValue("attempt").flatMap { Int($0) }
+            let task = event.stringValue("task")
 
             var budgetRemaining: LoopStatusInfo.LoopBudgetRemaining?
-            if let brJSON = event.data["budget_remaining"],
-               let brData = brJSON.data(using: .utf8),
-               let br = try? JSONSerialization.jsonObject(with: brData) as? [String: Any] {
+            if let br = event.data["budget_remaining"] as? [String: Any] {
+                // New parser: arrives as a nested JSON object directly.
+                budgetRemaining = LoopStatusInfo.LoopBudgetRemaining(
+                    attempts: br["attempts"] as? Int,
+                    commands: br["commands"] as? Int,
+                    wallSeconds: br["wall_seconds"] as? Double
+                )
+            } else if let brJSON = event.stringValue("budget_remaining"),
+                      let brData = brJSON.data(using: .utf8),
+                      let br = try? JSONSerialization.jsonObject(with: brData) as? [String: Any] {
+                // Fallback: string-encoded JSON (old parser behavior).
                 budgetRemaining = LoopStatusInfo.LoopBudgetRemaining(
                     attempts: br["attempts"] as? Int,
                     commands: br["commands"] as? Int,
@@ -350,18 +424,17 @@ final class ChatViewModel: ObservableObject {
             )
 
         case "loop_attempt":
-            if let attemptStr = event.data["attempt_number"],
-               let attemptNum = Int(attemptStr) {
-                if let ls = messages[messageIndex].loopStatus {
-                    messages[messageIndex].loopStatus = LoopStatusInfo(
-                        loopId: ls.loopId,
-                        status: "running",
-                        stopReason: nil,
-                        attempt: attemptNum,
-                        budgetRemaining: ls.budgetRemaining,
-                        task: ls.task
-                    )
-                }
+            // attempt_number may arrive as Int (new parser) or String (fallback)
+            let attemptNum = (event.data["attempt_number"] as? Int) ?? event.stringValue("attempt_number").flatMap { Int($0) }
+            if let attemptNum, let ls = messages[messageIndex].loopStatus {
+                messages[messageIndex].loopStatus = LoopStatusInfo(
+                    loopId: ls.loopId,
+                    status: "running",
+                    stopReason: nil,
+                    attempt: attemptNum,
+                    budgetRemaining: ls.budgetRemaining,
+                    task: ls.task
+                )
             }
 
         default:
@@ -399,6 +472,29 @@ final class ChatViewModel: ObservableObject {
             .count
     }
 
+    private func sendPermissionNotificationIfNeeded(request: PermissionRequest) {
+        let approvalId = request.approvalId
+        guard !sentNotificationIds.contains(approvalId) else { return }
+        sentNotificationIds.insert(approvalId)
+
+        // Only notify when the app is not the frontmost application.
+        guard NSApplication.shared.isActive == false else { return }
+
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Boss needs approval"
+            content.body = request.description
+            let req = UNNotificationRequest(
+                identifier: "boss.permission.\(approvalId)",
+                content: content,
+                trigger: nil  // deliver immediately
+            )
+            center.add(req)
+        }
+    }
+
     // MARK: - Sidebar refresh
 
     func refreshSidebar() async {
@@ -417,13 +513,13 @@ final class ChatViewModel: ObservableObject {
         }
 
         do {
-            memoryStats = try await api.fetchStats()
+            memoryState.memoryStats = try await api.fetchStats()
         } catch {
             failures.append("Memory stats unavailable: \(errorMessage(error))")
         }
 
         do {
-            memoryOverview = try await api.fetchMemoryOverview(
+            memoryState.memoryOverview = try await api.fetchMemoryOverview(
                 sessionId: sessionId,
                 message: currentMemoryPreviewMessage()
             )
@@ -435,18 +531,6 @@ final class ChatViewModel: ObservableObject {
             sidebarRefreshError = nil
         } else {
             sidebarRefreshError = "Sidebar refresh incomplete. \(failures.joined(separator: "  "))"
-        }
-    }
-
-    func refreshMemoryOverview(messageOverride: String? = nil) async {
-        do {
-            memoryOverview = try await api.fetchMemoryOverview(
-                sessionId: sessionId,
-                message: memoryPreviewMessage(messageOverride)
-            )
-            memoryRefreshError = nil
-        } catch {
-            memoryRefreshError = "Memory refresh failed. \(errorMessage(error))"
         }
     }
 
@@ -463,84 +547,10 @@ final class ChatViewModel: ObservableObject {
         do {
             systemStatus = try await api.fetchSystemStatus()
             promptDiagnostics = try? await api.fetchPromptDiagnostics(mode: selectedMode.rawValue)
-            deployStatus = try? await api.fetchDeployStatus()
+            await deployState.refreshStatus()
             diagnosticsRefreshError = nil
         } catch {
             diagnosticsRefreshError = "Diagnostics refresh failed. \(errorMessage(error))"
-        }
-    }
-
-    func refreshReviewSurface() async {
-        let requestedProjectPath = selectedReviewProjectPath ?? selectedProjectPath
-        var failures: [String] = []
-
-        do {
-            let capabilities = try await api.fetchReviewCapabilities(projectPath: requestedProjectPath)
-            reviewCapabilities = capabilities
-            if selectedReviewProjectPath == nil || selectedReviewProjectPath?.isEmpty == true {
-                selectedReviewProjectPath = capabilities.projectPath
-            }
-            if selectedReviewTarget != .auto,
-                      !capabilities.availableTargets.contains(selectedReviewTarget.rawValue),
-                      let fallback = ReviewTargetKind(rawValue: capabilities.defaultTarget) {
-                selectedReviewTarget = fallback
-            }
-        } catch {
-            failures.append("Review capabilities unavailable: \(errorMessage(error))")
-        }
-
-        do {
-            reviewHistory = try await api.fetchReviewHistory(limit: 30)
-            if let current = selectedReviewRun,
-               let refreshed = reviewHistory.first(where: { $0.reviewId == current.reviewId }) {
-                selectedReviewRun = refreshed
-            } else if selectedReviewRun == nil {
-                selectedReviewRun = reviewHistory.first
-            }
-        } catch {
-            failures.append("Review history unavailable: \(errorMessage(error))")
-        }
-
-        if failures.isEmpty {
-            reviewRefreshError = nil
-        } else {
-            reviewRefreshError = failures.joined(separator: "  ")
-        }
-    }
-
-    func refreshJobsSurface() async {
-        do {
-            jobs = try await api.fetchJobs(limit: 80)
-            if let current = selectedJob,
-               let refreshed = jobs.first(where: { $0.jobId == current.jobId }) {
-                selectedJob = refreshed
-                selectedJobLog = try? await api.fetchJobLog(jobId: refreshed.jobId, limit: 240)
-            } else if selectedJob == nil {
-                selectedJob = jobs.first
-                if let first = selectedJob {
-                    selectedJobLog = try? await api.fetchJobLog(jobId: first.jobId, limit: 240)
-                } else {
-                    selectedJobLog = nil
-                }
-            }
-            jobsRefreshError = nil
-        } catch {
-            jobsRefreshError = "Jobs refresh failed. \(errorMessage(error))"
-        }
-    }
-
-    func refreshWorkersSurface() async {
-        do {
-            workPlans = try await api.fetchWorkPlans(limit: 50)
-            if let current = selectedWorkPlan,
-               let refreshed = workPlans.first(where: { $0.planId == current.planId }) {
-                selectedWorkPlan = refreshed
-            } else if selectedWorkPlan == nil {
-                selectedWorkPlan = workPlans.first
-            }
-            workersRefreshError = nil
-        } catch {
-            workersRefreshError = "Workers refresh failed. \(errorMessage(error))"
         }
     }
 
@@ -551,7 +561,7 @@ final class ChatViewModel: ObservableObject {
     func showMemory(projectPath: String? = nil) {
         selectedProjectPath = projectPath
         selectedSurface = .memory
-        Task { await refreshMemoryOverview() }
+        Task { await memoryState.refreshOverview(sessionId: sessionId, message: currentMemoryPreviewMessage()) }
     }
 
     func showDiagnostics() {
@@ -561,7 +571,7 @@ final class ChatViewModel: ObservableObject {
 
     func showJobs() {
         selectedSurface = .jobs
-        Task { await refreshJobsSurface() }
+        Task { await jobsState.refresh() }
     }
 
     func showPermissions() {
@@ -571,12 +581,12 @@ final class ChatViewModel: ObservableObject {
 
     func showReview(projectPath: String? = nil) {
         if let projectPath {
-            selectedReviewProjectPath = projectPath
-        } else if selectedReviewProjectPath == nil {
-            selectedReviewProjectPath = selectedProjectPath
+            reviewState.selectedReviewProjectPath = projectPath
+        } else if reviewState.selectedReviewProjectPath == nil {
+            reviewState.selectedReviewProjectPath = selectedProjectPath
         }
         selectedSurface = .review
-        Task { await refreshReviewSurface() }
+        Task { await reviewState.refresh(fallbackProjectPath: selectedProjectPath) }
     }
 
     func showPreview() {
@@ -586,12 +596,12 @@ final class ChatViewModel: ObservableObject {
 
     func showWorkers() {
         selectedSurface = .workers
-        Task { await refreshWorkersSurface() }
+        Task { await workersState.refresh() }
     }
 
     func showDeploy() {
         selectedSurface = .deploy
-        Task { await refreshDeploySurface() }
+        Task { await deployState.refresh() }
     }
 
     func refreshPreviewSurface() async {
@@ -603,50 +613,14 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func refreshDeploySurface() async {
-        do {
-            deployStatus = try await api.fetchDeployStatus()
-            deployments = try await api.fetchDeployments(limit: 50)
-            if let current = selectedDeployment,
-               let refreshed = deployments.first(where: { $0.deploymentId == current.deploymentId }) {
-                selectedDeployment = refreshed
-            } else if selectedDeployment == nil {
-                selectedDeployment = deployments.first
-            }
-            deployRefreshError = nil
-        } catch {
-            deployRefreshError = "Deploy refresh failed. \(errorMessage(error))"
-        }
-    }
-
-    func selectReviewTarget(_ target: ReviewTargetKind) {
-        selectedReviewTarget = target
-    }
-
-    func selectReviewRun(_ run: ReviewRunInfo) {
-        selectedReviewRun = run
-    }
-
-    func selectJob(_ job: BackgroundJobInfo) {
-        selectedJob = job
-        Task {
-            do {
-                selectedJobLog = try await api.fetchJobLog(jobId: job.jobId, limit: 240)
-                jobsRefreshError = nil
-            } catch {
-                jobsRefreshError = "Couldn't load job log. \(errorMessage(error))"
-            }
-        }
-    }
-
     func launchBackgroundJob() {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let attachments = draftAttachments
         let requestText = requestMessage(text: text, attachments: attachments)
-        guard !requestText.isEmpty, !isLaunchingBackgroundJob else { return }
+        guard !requestText.isEmpty, !jobsState.isLaunchingBackgroundJob else { return }
 
-        isLaunchingBackgroundJob = true
-        jobsRefreshError = nil
+        jobsState.isLaunchingBackgroundJob = true
+        jobsState.jobsRefreshError = nil
 
         let jobSessionId = sessionId
         let mode = selectedMode
@@ -655,7 +629,7 @@ final class ChatViewModel: ObservableObject {
 
         Task {
             guard await ensureBackendReadyForBackgroundAction() else {
-                isLaunchingBackgroundJob = false
+                jobsState.isLaunchingBackgroundJob = false
                 return
             }
 
@@ -670,44 +644,15 @@ final class ChatViewModel: ObservableObject {
                 inputText = ""
                 draftAttachments = []
                 selectedSurface = .jobs
-                jobs.removeAll { $0.jobId == job.jobId }
-                jobs.insert(job, at: 0)
-                selectedJob = job
-                selectedJobLog = try? await api.fetchJobLog(jobId: job.jobId, limit: 240)
-                jobsRefreshError = nil
-                await refreshJobsSurface()
+                jobsState.replaceJob(job)
+                jobsState.selectedJob = job
+                jobsState.selectedJobLog = try? await api.fetchJobLog(jobId: job.jobId, limit: 240)
+                jobsState.jobsRefreshError = nil
+                await jobsState.refresh()
             } catch {
-                jobsRefreshError = "Couldn't launch background job. \(errorMessage(error))"
+                jobsState.jobsRefreshError = "Couldn't launch background job. \(errorMessage(error))"
             }
-            isLaunchingBackgroundJob = false
-        }
-    }
-
-    func cancelJob(_ job: BackgroundJobInfo) {
-        Task {
-            do {
-                let updated = try await api.cancelJob(jobId: job.jobId)
-                replaceJob(updated)
-                selectedJob = updated
-                selectedJobLog = try? await api.fetchJobLog(jobId: updated.jobId, limit: 240)
-                jobsRefreshError = nil
-            } catch {
-                jobsRefreshError = "Couldn't cancel background job. \(errorMessage(error))"
-            }
-        }
-    }
-
-    func resumeJob(_ job: BackgroundJobInfo) {
-        Task {
-            do {
-                let updated = try await api.resumeJob(jobId: job.jobId)
-                replaceJob(updated)
-                selectedJob = updated
-                selectedJobLog = try? await api.fetchJobLog(jobId: updated.jobId, limit: 240)
-                jobsRefreshError = nil
-            } catch {
-                jobsRefreshError = "Couldn't resume background job. \(errorMessage(error))"
-            }
+            jobsState.isLaunchingBackgroundJob = false
         }
     }
 
@@ -716,44 +661,11 @@ final class ChatViewModel: ObservableObject {
             do {
                 let takeover = try await api.takeOverJob(jobId: job.jobId)
                 applyJobTakeover(takeover)
-                jobsRefreshError = nil
-                await refreshJobsSurface()
+                jobsState.jobsRefreshError = nil
+                await jobsState.refresh()
             } catch {
-                jobsRefreshError = "Couldn't take over background job. \(errorMessage(error))"
+                jobsState.jobsRefreshError = "Couldn't take over background job. \(errorMessage(error))"
             }
-        }
-    }
-
-    func runReview() {
-        guard !isRunningReview else { return }
-        isRunningReview = true
-        reviewRefreshError = nil
-        selectedSurface = .review
-
-        let target = selectedReviewTarget
-        let projectPath = normalizedReviewValue(selectedReviewProjectPath)
-        let baseRef = normalizedReviewValue(reviewBaseRef)
-        let headRef = normalizedReviewValue(reviewHeadRef)
-        let filePaths = parsedReviewFilePaths()
-
-        Task {
-            do {
-                let result = try await api.runReview(
-                    target: target,
-                    projectPath: projectPath,
-                    baseRef: baseRef,
-                    headRef: headRef,
-                    filePaths: filePaths
-                )
-                reviewHistory.removeAll { $0.reviewId == result.reviewId }
-                reviewHistory.insert(result, at: 0)
-                selectedReviewRun = result
-                reviewRefreshError = nil
-                await refreshReviewSurface()
-            } catch {
-                reviewRefreshError = "Review failed. \(errorMessage(error))"
-            }
-            isRunningReview = false
         }
     }
 
@@ -772,90 +684,6 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func forgetMemory(sourceTable: String, itemId: Int) {
-        Task {
-            do {
-                try await api.deleteMemoryItem(sourceTable: sourceTable, itemId: itemId)
-                memoryRefreshError = nil
-                await refreshSidebar()
-            } catch {
-                memoryRefreshError = "Couldn't update memory. \(errorMessage(error))"
-            }
-        }
-    }
-
-    func saveMemoryCandidate(candidateId: Int, label: String, text: String, evidence: String?) {
-        Task {
-            do {
-                try await api.updateMemoryCandidate(candidateId: candidateId, label: label, text: text, evidence: evidence)
-                memoryRefreshError = nil
-                await refreshSidebar()
-            } catch {
-                memoryRefreshError = "Couldn't update pending memory. \(errorMessage(error))"
-            }
-        }
-    }
-
-    func approveMemoryCandidate(
-        candidateId: Int,
-        label: String,
-        text: String,
-        evidence: String?,
-        pin: Bool = false
-    ) {
-        Task {
-            do {
-                try await api.approveMemoryCandidate(
-                    candidateId: candidateId,
-                    label: label,
-                    text: text,
-                    evidence: evidence,
-                    pin: pin
-                )
-                memoryRefreshError = nil
-                await refreshSidebar()
-            } catch {
-                memoryRefreshError = "Couldn't approve memory. \(errorMessage(error))"
-            }
-        }
-    }
-
-    func rejectMemoryCandidate(candidateId: Int) {
-        Task {
-            do {
-                try await api.rejectMemoryCandidate(candidateId: candidateId)
-                memoryRefreshError = nil
-                await refreshSidebar()
-            } catch {
-                memoryRefreshError = "Couldn't reject memory. \(errorMessage(error))"
-            }
-        }
-    }
-
-    func expireMemoryCandidate(candidateId: Int) {
-        Task {
-            do {
-                try await api.expireMemoryCandidate(candidateId: candidateId)
-                memoryRefreshError = nil
-                await refreshSidebar()
-            } catch {
-                memoryRefreshError = "Couldn't expire memory. \(errorMessage(error))"
-            }
-        }
-    }
-
-    func setMemoryPinned(itemId: Int, pinned: Bool) {
-        Task {
-            do {
-                try await api.setMemoryPinned(itemId: itemId, pinned: pinned)
-                memoryRefreshError = nil
-                await refreshSidebar()
-            } catch {
-                memoryRefreshError = "Couldn't update pin state. \(errorMessage(error))"
-            }
-        }
-    }
-
     func newSession() {
         messages = [ChatMessage(role: .system, content: "New session started.")]
         sessionId = UUID().uuidString
@@ -865,18 +693,121 @@ final class ChatViewModel: ObservableObject {
         currentAgent = AgentInfo.entryAgentName
         draftAttachments = []
         selectedProjectPath = nil
-        selectedReviewProjectPath = nil
-        memoryOverview = nil
-        reviewCapabilities = nil
-        reviewHistory = []
-        selectedReviewRun = nil
+        reviewState.selectedReviewProjectPath = nil
+        memoryState.reset()
+        reviewState.reset()
         sidebarRefreshError = nil
-        memoryRefreshError = nil
         diagnosticsRefreshError = nil
-        reviewRefreshError = nil
         permissionsRefreshError = nil
         selectedSurface = .chat
         Task { await refreshSidebar() }
+    }
+
+    func loadSession(_ id: String) {
+        guard let restored = SessionStore.shared.load(sessionId: id) else { return }
+        messages = restored
+        sessionId = id
+        pendingPermissionCount = 0
+        activeToolName = nil
+        isLoading = false
+        currentAgent = AgentInfo.entryAgentName
+        draftAttachments = []
+        selectedSurface = .chat
+    }
+
+    func deleteSession(_ id: String) {
+        SessionStore.shared.delete(sessionId: id)
+        savedSessions = SessionStore.shared.listSessions()
+        // If we deleted the current session, start a new one.
+        if id == sessionId {
+            newSession()
+        }
+    }
+
+    // MARK: - Message Actions
+
+    func deleteMessage(_ messageId: UUID) {
+        messages.removeAll { $0.id == messageId }
+        SessionStore.shared.save(sessionId: sessionId, messages: messages)
+        savedSessions = SessionStore.shared.listSessions()
+    }
+
+    func editLastUserMessage() {
+        guard !isLoading else { return }
+        let realMessages = messages.filter { $0.role != .system }
+        guard let lastUser = realMessages.last(where: { $0.role == .user }) else { return }
+        // Only allow editing the very last user message
+        guard let lastUserIndex = realMessages.lastIndex(where: { $0.role == .user }),
+              lastUserIndex == realMessages.count - 1 || lastUserIndex == realMessages.count - 2 else {
+            return
+        }
+
+        inputText = lastUser.content
+        draftAttachments = lastUser.attachments
+
+        // Remove the last user message and any following assistant message
+        if let userIdx = messages.firstIndex(where: { $0.id == lastUser.id }) {
+            let followingAssistantIdx = messages.index(after: userIdx)
+            if followingAssistantIdx < messages.count && messages[followingAssistantIdx].role == .assistant {
+                messages.remove(at: followingAssistantIdx)
+            }
+            messages.remove(at: userIdx)
+        }
+
+        SessionStore.shared.save(sessionId: sessionId, messages: messages)
+        savedSessions = SessionStore.shared.listSessions()
+    }
+
+    // MARK: - Conversation Export
+
+    func exportConversation(asMarkdown: Bool) {
+        let realMessages = messages.filter { $0.role == .user || $0.role == .assistant }
+            .filter { !$0.content.isEmpty }
+        guard !realMessages.isEmpty else { return }
+
+        let text: String
+        let ext: String
+        if asMarkdown {
+            ext = "md"
+            text = realMessages.map { msg in
+                switch msg.role {
+                case .user:
+                    return "## User\n\n\(msg.content)\n\n---\n"
+                case .assistant:
+                    let agentLabel = msg.agent ?? "Boss"
+                    return "## Assistant (\(agentLabel))\n\n\(msg.content)\n\n---\n"
+                default:
+                    return ""
+                }
+            }.joined(separator: "\n")
+        } else {
+            ext = "txt"
+            text = realMessages.map { msg in
+                switch msg.role {
+                case .user:
+                    return "User: \(msg.content)\n"
+                case .assistant:
+                    return "Assistant: \(msg.content)\n"
+                default:
+                    return ""
+                }
+            }.joined(separator: "\n")
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmm"
+        let dateStr = formatter.string(from: Date())
+        let defaultName = "boss-chat-\(dateStr).\(ext)"
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = defaultName
+        panel.allowedContentTypes = asMarkdown
+            ? [.init(filenameExtension: "md") ?? .plainText]
+            : [.plainText]
+
+        if panel.runModal() == .OK, let url = panel.url {
+            try? text.write(to: url, atomically: true, encoding: .utf8)
+        }
     }
 
     func selectMode(_ mode: WorkMode) {
@@ -1066,14 +997,6 @@ final class ChatViewModel: ObservableObject {
         currentAgent = AgentInfo.entryAgentName
     }
 
-    private func replaceJob(_ updated: BackgroundJobInfo) {
-        if let index = jobs.firstIndex(where: { $0.jobId == updated.jobId }) {
-            jobs[index] = updated
-        } else {
-            jobs.insert(updated, at: 0)
-        }
-    }
-
     private func chatMessage(from info: SessionMessageInfo) -> ChatMessage {
         let role: ChatMessage.Role
         switch info.role.lowercased() {
@@ -1107,18 +1030,5 @@ final class ChatViewModel: ObservableObject {
         }
 
         return messages.last(where: { $0.role == .user })?.content
-    }
-
-    private func parsedReviewFilePaths() -> [String] {
-        reviewFilePathsText
-            .split(whereSeparator: { $0 == "\n" || $0 == "," })
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
-    private func normalizedReviewValue(_ value: String?) -> String? {
-        guard let value else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }

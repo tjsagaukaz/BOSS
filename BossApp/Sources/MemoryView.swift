@@ -7,6 +7,22 @@ struct MemoryView: View {
     @State private var candidateDraftLabels: [Int: String] = [:]
     @State private var candidateDraftTexts: [Int: String] = [:]
     @State private var candidateDraftEvidence: [Int: String] = [:]
+    @State private var searchText: String = ""
+
+    private var isSearching: Bool { !searchText.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    private func matchesSearch(_ record: MemoryRecord) -> Bool {
+        let q = searchText.lowercased()
+        return record.label.lowercased().contains(q)
+            || record.text.lowercased().contains(q)
+            || record.category.lowercased().contains(q)
+    }
+
+    private func matchesCandidateSearch(_ candidate: MemoryCandidateInfo) -> Bool {
+        let q = searchText.lowercased()
+        return candidate.label.lowercased().contains(q)
+            || candidate.text.lowercased().contains(q)
+    }
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -15,12 +31,42 @@ struct MemoryView: View {
                     .padding(.top, 80)
                     .padding(.bottom, 28)
 
-                if let message = vm.memoryRefreshError {
+                SearchBar(text: $searchText, placeholder: "Search memories…")
+                    .padding(.bottom, 16)
+
+                if let message = vm.memoryState.memoryRefreshError {
                     InlineStatusBanner(message: message)
                         .padding(.bottom, 20)
                 }
 
-                if let overview = vm.memoryOverview {
+                if let overview = vm.memoryState.memoryOverview {
+                    if isSearching {
+                        let allRecords = overview.userProfile + overview.preferences + overview.recentMemories + overview.conversationSummaries
+                        let matchedRecords = allRecords.filter { matchesSearch($0) }
+                        let matchedCandidates = overview.pendingCandidates.filter { matchesCandidateSearch($0) }
+
+                        if matchedRecords.isEmpty && matchedCandidates.isEmpty {
+                            Text("No results for \"\(searchText)\"")
+                                .font(.system(size: 13))
+                                .foregroundColor(Color.white.opacity(0.34))
+                                .padding(.top, 8)
+                        } else {
+                            LazyVStack(alignment: .leading, spacing: 0) {
+                                ForEach(Array(matchedCandidates.enumerated()), id: \.element.id) { index, candidate in
+                                    pendingCandidateRow(candidate)
+                                    if index < matchedCandidates.count - 1 || !matchedRecords.isEmpty {
+                                        Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1)
+                                    }
+                                }
+                                ForEach(Array(matchedRecords.enumerated()), id: \.element.id) { index, item in
+                                    memoryRow(item)
+                                    if index < matchedRecords.count - 1 {
+                                        Rectangle().fill(Color.white.opacity(0.05)).frame(height: 1)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
                     VStack(alignment: .leading, spacing: 24) {
                         scanStatusCard(overview.scanStatus)
 
@@ -54,7 +100,7 @@ struct MemoryView: View {
                             memorySection(
                                 title: "Recent Memories",
                                 subtitle: "Most recently confirmed or used memories",
-                                items: overview.recentMemories.prefix(10).map { $0 }
+                                items: overview.recentMemories
                             )
                         }
 
@@ -70,6 +116,7 @@ struct MemoryView: View {
                             projectSummariesSection(orderedProjectSummaries(overview))
                         }
                     }
+                    }
                 } else {
                     emptyState
                 }
@@ -79,7 +126,7 @@ struct MemoryView: View {
             .padding(.bottom, 32)
         }
         .task {
-            await vm.refreshMemoryOverview()
+            await vm.memoryState.refreshOverview(sessionId: vm.sessionId, message: nil)
         }
     }
 
@@ -137,15 +184,9 @@ struct MemoryView: View {
                 scanMetric("Chunks", value: scanStatus.fileChunks)
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     private func scanMetric(_ label: String, value: Int) -> some View {
@@ -217,12 +258,7 @@ struct MemoryView: View {
                 Spacer()
 
                 if reason.deletable && reason.sourceTable != "memory_candidates" {
-                    Button(action: { vm.forgetMemory(sourceTable: reason.sourceTable, itemId: reason.memoryId) }) {
-                        Text("Forget")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.white.opacity(0.54))
-                    }
-                    .buttonStyle(.plain)
+                    BossTertiaryButton(title: "Forget") { vm.memoryState.forgetMemory(sourceTable: reason.sourceTable, itemId: reason.memoryId) }
                 }
             }
 
@@ -258,18 +294,12 @@ struct MemoryView: View {
             HStack(spacing: 24) {
                 scanMetric("Pending", value: governance.pendingCandidates)
                 scanMetric("Pinned", value: governance.pinnedMemories)
-                scanMetric("Approved", value: vm.memoryOverview?.recentMemories.count ?? 0)
+                scanMetric("Approved", value: vm.memoryState.memoryOverview?.recentMemories.count ?? 0)
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.white.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white.opacity(0.05), lineWidth: 1)
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     private func pendingCandidatesSection(_ candidates: [MemoryCandidateInfo]) -> some View {
@@ -399,7 +429,7 @@ struct MemoryView: View {
             HStack(spacing: 12) {
                 if isEditing {
                     Button(action: {
-                        vm.saveMemoryCandidate(
+                        vm.memoryState.saveMemoryCandidate(
                             candidateId: candidate.candidateId,
                             label: labelBinding.wrappedValue,
                             text: textBinding.wrappedValue,
@@ -413,7 +443,7 @@ struct MemoryView: View {
                     .buttonStyle(.plain)
 
                     Button(action: {
-                        vm.approveMemoryCandidate(
+                        vm.memoryState.approveMemoryCandidate(
                             candidateId: candidate.candidateId,
                             label: labelBinding.wrappedValue,
                             text: textBinding.wrappedValue,
@@ -437,7 +467,7 @@ struct MemoryView: View {
                     .buttonStyle(.plain)
                 } else {
                     Button(action: {
-                        vm.approveMemoryCandidate(
+                        vm.memoryState.approveMemoryCandidate(
                             candidateId: candidate.candidateId,
                             label: candidate.label,
                             text: candidate.text,
@@ -459,17 +489,17 @@ struct MemoryView: View {
                     }
                     .buttonStyle(.plain)
 
-                    Button(action: { vm.rejectMemoryCandidate(candidateId: candidate.candidateId) }) {
+                    Button(action: { vm.memoryState.rejectMemoryCandidate(candidateId: candidate.candidateId) }) {
                         Text("Reject")
                             .font(.system(size: 12))
-                            .foregroundColor(Color.white.opacity(0.56))
+                            .foregroundColor(Color.white.opacity(0.55))
                     }
                     .buttonStyle(.plain)
 
-                    Button(action: { vm.expireMemoryCandidate(candidateId: candidate.candidateId) }) {
+                    Button(action: { vm.memoryState.expireMemoryCandidate(candidateId: candidate.candidateId) }) {
                         Text("Expire")
                             .font(.system(size: 12))
-                            .foregroundColor(Color.white.opacity(0.46))
+                            .foregroundColor(Color.white.opacity(0.55))
                     }
                     .buttonStyle(.plain)
                 }
@@ -513,21 +543,15 @@ struct MemoryView: View {
                 Spacer()
 
                 if item.sourceTable == "durable_memories" {
-                    Button(action: { vm.setMemoryPinned(itemId: item.memoryId, pinned: !item.pinned) }) {
-                        Text(item.pinned ? "Unpin" : "Pin")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.white.opacity(0.54))
+                    BossTertiaryButton(title: item.pinned ? "Unpin" : "Pin") {
+                        vm.memoryState.setMemoryPinned(itemId: item.memoryId, pinned: !item.pinned)
                     }
-                    .buttonStyle(.plain)
                 }
 
                 if item.deletable {
-                    Button(action: { vm.forgetMemory(sourceTable: item.sourceTable, itemId: item.memoryId) }) {
-                        Text("Forget")
-                            .font(.system(size: 12))
-                            .foregroundColor(Color.white.opacity(0.54))
+                    BossTertiaryButton(title: "Forget") {
+                        vm.memoryState.forgetMemory(sourceTable: item.sourceTable, itemId: item.memoryId)
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
@@ -604,6 +628,7 @@ struct MemoryView: View {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(Color.white.opacity(0.4))
+                        .accessibilityLabel(isExpanded ? "Collapse" : "Expand")
                 }
                 .contentShape(Rectangle())
             }
@@ -631,12 +656,9 @@ struct MemoryView: View {
                         Spacer()
 
                         if project.deletable {
-                            Button(action: { vm.forgetMemory(sourceTable: project.sourceTable, itemId: project.memoryId) }) {
-                                Text("Forget")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(Color.white.opacity(0.54))
+                            BossTertiaryButton(title: "Forget") {
+                                vm.memoryState.forgetMemory(sourceTable: project.sourceTable, itemId: project.memoryId)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -678,15 +700,7 @@ struct MemoryView: View {
     }
 
     private func statusPill(_ label: String) -> some View {
-        Text(label)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(Color.white.opacity(0.72))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                Capsule()
-                    .fill(Color.white.opacity(0.07))
-            )
+        StatusPill(text: label, color: Color.white.opacity(0.72))
     }
 
     private func orderedProjectSummaries(_ overview: MemoryOverview) -> [ProjectSummaryInfo] {

@@ -9,17 +9,17 @@ struct DeployView: View {
                 header
                     .padding(.top, 80)
 
-                if let error = vm.deployRefreshError {
+                if let error = vm.deployState.deployRefreshError {
                     InlineStatusBanner(message: error)
                 }
 
                 statusCard
 
-                if !vm.deployments.isEmpty {
+                if !vm.deployState.deployments.isEmpty {
                     deploymentsSection
                 }
 
-                if let deploy = vm.selectedDeployment {
+                if let deploy = vm.deployState.selectedDeployment {
                     deploymentDetail(deploy)
                 } else {
                     emptyState
@@ -30,7 +30,7 @@ struct DeployView: View {
             .padding(.bottom, 32)
         }
         .task {
-            await vm.refreshDeploySurface()
+            await vm.deployState.refresh()
         }
     }
 
@@ -58,7 +58,7 @@ struct DeployView: View {
                         .font(.system(size: 14, weight: .medium))
                         .foregroundColor(Color.white.opacity(0.9))
 
-                    if let status = vm.deployStatus {
+                    if let status = vm.deployState.deployStatus {
                         Text(status.enabled ? "Configured and ready" : "Not configured — set credentials to enable")
                             .font(.system(size: 12))
                             .foregroundColor(Color.white.opacity(0.34))
@@ -71,15 +71,13 @@ struct DeployView: View {
 
                 Spacer()
 
-                Button(action: { Task { await vm.refreshDeploySurface() } }) {
-                    Text("Refresh")
-                        .font(.system(size: 12))
-                        .foregroundColor(Color.white.opacity(0.64))
+                BossTertiaryButton(title: "Refresh") {
+                    Task { await vm.deployState.refresh() }
                 }
-                .buttonStyle(.plain)
+                .help("Refresh")
             }
 
-            if let status = vm.deployStatus {
+            if let status = vm.deployState.deployStatus {
                 HStack(spacing: 24) {
                     metric(label: "Adapters", value: status.configuredCount)
                     metric(label: "Live", value: status.liveCount)
@@ -105,26 +103,22 @@ struct DeployView: View {
                 }
             }
         }
-        .padding(16)
-        .background(Color.white.opacity(0.04))
-        .cornerRadius(10)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     // MARK: - Deployments list
 
     private var deploymentsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("Deployments")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(Color.white.opacity(0.7))
 
             VStack(spacing: 2) {
-                ForEach(vm.deployments) { deploy in
-                    Button(action: { vm.selectedDeployment = deploy }) {
+                ForEach(vm.deployState.deployments) { deploy in
+                    Button(action: { vm.deployState.selectedDeployment = deploy }) {
                         HStack(spacing: 10) {
                             statusBadge(deploy.status)
                             VStack(alignment: .leading, spacing: 2) {
@@ -146,7 +140,7 @@ struct DeployView: View {
                         .padding(.vertical, 6)
                         .padding(.horizontal, 10)
                         .background(
-                            deploy.deploymentId == vm.selectedDeployment?.deploymentId
+                            deploy.deploymentId == vm.deployState.selectedDeployment?.deploymentId
                                 ? Color.white.opacity(0.06)
                                 : Color.clear
                         )
@@ -190,13 +184,9 @@ struct DeployView: View {
                 logSection(title: "Deploy Log", text: deploy.deployLog)
             }
         }
-        .padding(16)
-        .background(Color.white.opacity(0.04))
-        .cornerRadius(10)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.white.opacity(0.06), lineWidth: 1)
-        )
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.white.opacity(0.035)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
     // MARK: - Empty state
@@ -266,12 +256,6 @@ struct DeployView: View {
             default: return .yellow
             }
         }()
-        return Text(status)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundColor(color.opacity(0.9))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(color.opacity(0.15))
-            .cornerRadius(4)
+        return StatusPill(text: status, color: color)
     }
 }

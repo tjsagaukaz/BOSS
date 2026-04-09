@@ -18,7 +18,9 @@ private enum Typo {
 
 struct ChatView: View {
     @EnvironmentObject var vm: ChatViewModel
-    @FocusState private var inputFocused: Bool
+    @AppStorage("bossAutoScroll") private var autoScrollEnabled: Bool = true
+    @State private var isNearBottom: Bool = true
+    @State private var scrollViewHeight: CGFloat = 0
 
     private var hasRealMessages: Bool {
         vm.messages.contains { $0.role == .user || $0.role == .assistant }
@@ -31,14 +33,32 @@ struct ChatView: View {
                     VStack(spacing: 0) {
                         // Persistent header anchor
                         if hasRealMessages {
-                            Text("Boss")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundColor(Typo.tertiaryText)
-                                .tracking(0.3)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.leading, 4)
-                                .padding(.top, 8)
-                                .padding(.bottom, 4)
+                            HStack {
+                                Text("Boss")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(Typo.tertiaryText)
+                                    .tracking(0.3)
+
+                                Spacer()
+
+                                Menu {
+                                    Button("Export as Markdown") { vm.exportConversation(asMarkdown: true) }
+                                    Button("Export as Text") { vm.exportConversation(asMarkdown: false) }
+                                } label: {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(Typo.tertiaryText)
+                                }
+                                .menuStyle(.borderlessButton)
+                                .buttonStyle(.plain)
+                                .frame(width: 20)
+                                .accessibilityLabel("Export conversation")
+                                .help("Export conversation")
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, 4)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
                         } else {
                             VStack(spacing: 8) {
                                 Text("Boss")
@@ -56,14 +76,15 @@ struct ChatView: View {
 
                         // Message flow
                         VStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(vm.messages.enumerated()), id: \.element.id) { index, message in
-                                if message.role != .system {
-                                    MessageView(
-                                        message: message,
-                                        previousRole: previousRole(at: index)
-                                    )
-                                    .id(message.id)
-                                }
+                            let realMessages = vm.messages.filter { $0.role != .system }
+                            let lastUserMsgId = realMessages.last(where: { $0.role == .user })?.id
+                            ForEach(Array(realMessages.enumerated()), id: \.element.id) { index, message in
+                                MessageView(
+                                    message: message,
+                                    previousRole: index > 0 ? realMessages[index - 1].role : nil,
+                                    isLastUserMessage: message.id == lastUserMsgId
+                                )
+                                .id(message.id)
                             }
                         }
                     }
@@ -71,28 +92,46 @@ struct ChatView: View {
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, hasRealMessages ? 80 : 0)
                     .padding(.bottom, 32)
+
+                    // Bottom anchor for scroll position tracking
+                    Color.clear.frame(height: 1)
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(
+                                key: ScrollBottomOffsetKey.self,
+                                value: geo.frame(in: .named("chatScroll")).minY
+                            )
+                        })
+                }
+                .coordinateSpace(name: "chatScroll")
+                .overlay(GeometryReader { geo in
+                    Color.clear
+                        .onAppear { scrollViewHeight = geo.size.height }
+                        .onChange(of: geo.size.height) { _, h in scrollViewHeight = h }
+                })
+                .onPreferenceChange(ScrollBottomOffsetKey.self) { bottomY in
+                    isNearBottom = bottomY <= scrollViewHeight + 150
                 }
                 .onChange(of: vm.messages.count) { _, _ in
-                    if let last = vm.messages.last {
+                    if let last = vm.messages.last, isNearBottom, autoScrollEnabled {
                         withAnimation(.easeOut(duration: 0.14)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
                 }
                 .onChange(of: vm.messages.last?.content) { _, _ in
-                    if let last = vm.messages.last, last.isStreaming {
+                    if let last = vm.messages.last, last.isStreaming, isNearBottom, autoScrollEnabled {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
             }
 
             // System state strip
-            systemStateBar
+            SystemStateBarView()
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity, alignment: .center)
 
             // Input
-            inputBar
+            InputBarView()
                 .frame(maxWidth: 680)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.bottom, 32)
@@ -111,16 +150,14 @@ struct ChatView: View {
         )
     }
 
-    private func previousRole(at index: Int) -> ChatMessage.Role? {
-        let realMessages = vm.messages.filter { $0.role != .system }
-        guard let currentIdx = realMessages.firstIndex(where: { $0.id == vm.messages[index].id }),
-              currentIdx > 0 else { return nil }
-        return realMessages[currentIdx - 1].role
-    }
+}
 
-    // MARK: - System State Bar
+// MARK: - System State Bar (extracted for SwiftUI diffing performance)
 
-    private var systemStateBar: some View {
+private struct SystemStateBarView: View {
+    @EnvironmentObject var vm: ChatViewModel
+
+    var body: some View {
         HStack(spacing: 6) {
             Circle()
                 .fill(
@@ -129,6 +166,7 @@ struct ChatView: View {
                         : vm.isLoading ? BossColor.accent.opacity(0.8) : Color.white.opacity(0.15)
                 )
                 .frame(width: 5, height: 5)
+                .accessibilityHidden(true)
 
             if vm.pendingPermissionCount > 0 {
                 Text("Awaiting approval")
@@ -157,8 +195,13 @@ struct ChatView: View {
         .padding(.bottom, 6)
         .animation(.easeOut(duration: 0.14), value: vm.isLoading)
     }
+}
 
-    // MARK: - Input Bar
+// MARK: - Input Bar (extracted for SwiftUI diffing performance)
+
+private struct InputBarView: View {
+    @EnvironmentObject var vm: ChatViewModel
+    @FocusState private var inputFocused: Bool
 
     private var hasText: Bool {
         !vm.inputText.trimmingCharacters(in: .whitespaces).isEmpty
@@ -168,7 +211,7 @@ struct ChatView: View {
         hasText || !vm.draftAttachments.isEmpty
     }
 
-    private var inputBar: some View {
+    var body: some View {
         VStack(spacing: 0) {
             // Text area
             TextField("Ask Boss...", text: $vm.inputText, axis: .vertical)
@@ -200,6 +243,7 @@ struct ChatView: View {
                 Button(action: pickAttachments) {
                     Image(systemName: "plus")
                         .font(.system(size: 15, weight: .medium))
+                        .symbolRenderingMode(.monochrome)
                         .foregroundColor(Typo.secondaryText)
                         .frame(width: 28, height: 28)
                         .background(
@@ -208,6 +252,8 @@ struct ChatView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Attach file")
+                .help("Attach file")
 
                 Spacer(minLength: 12)
 
@@ -279,42 +325,55 @@ struct ChatView: View {
                 Spacer(minLength: 12)
 
                 Button(action: { vm.launchBackgroundJob() }) {
-                    Image(systemName: vm.isLaunchingBackgroundJob ? "hourglass" : "clock.badge.plus")
+                    Image(systemName: vm.jobsState.isLaunchingBackgroundJob ? "hourglass" : "clock.badge.plus")
                         .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(hasDraftContent && !vm.isLaunchingBackgroundJob ? .white : Typo.tertiaryText)
+                        .symbolRenderingMode(.monochrome)
+                        .foregroundColor(hasDraftContent && !vm.jobsState.isLaunchingBackgroundJob ? .white : Typo.tertiaryText)
                         .frame(width: 30, height: 30)
                         .background(
                             Circle()
-                                .fill(hasDraftContent && !vm.isLaunchingBackgroundJob
+                                .fill(hasDraftContent && !vm.jobsState.isLaunchingBackgroundJob
                                     ? Color.white.opacity(0.12)
                                     : Color.white.opacity(0.06))
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Launch background job")
                 .help("Launch this prompt as a local background job")
-                .disabled(!hasDraftContent || vm.isLaunchingBackgroundJob)
+                .disabled(!hasDraftContent || vm.jobsState.isLaunchingBackgroundJob)
 
                 Button(action: { vm.send() }) {
                     Image(systemName: vm.isLoading ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(hasDraftContent || vm.isLoading ? .white : Typo.tertiaryText)
-                        .frame(width: 30, height: 30)
+                        .font(.system(size: 14, weight: .semibold))
+                        .symbolRenderingMode(.monochrome)
+                        .foregroundColor(hasDraftContent || vm.isLoading ? .black : Typo.tertiaryText)
+                        .frame(width: 32, height: 32)
                         .background(
                             Circle()
                                 .fill(hasDraftContent || vm.isLoading
                                     ? BossColor.accent
                                     : Color.white.opacity(0.06))
+                                .shadow(
+                                    color: (hasDraftContent || vm.isLoading) ? BossColor.accent.opacity(0.6) : .clear,
+                                    radius: 6, x: 0, y: 2
+                                )
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(vm.isLoading ? "Stop generation" : "Send message")
+                .help(vm.isLoading ? "Stop generation" : "Send message")
                 .keyboardShortcut(.return, modifiers: .command)
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 14)
         }
         .background(
-            RoundedRectangle(cornerRadius: 26)
-                .fill(Color.white.opacity(0.06))
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                )
         )
         .padding(.horizontal, 20)
     }
@@ -352,8 +411,11 @@ struct ChatView: View {
 
 struct MessageView: View {
     @EnvironmentObject var vm: ChatViewModel
+    @AppStorage("bossFontSize") private var fontSize: Double = 15
+    @AppStorage("bossShowThinking") private var showThinkingDefault: Bool = false
     let message: ChatMessage
     let previousRole: ChatMessage.Role?
+    var isLastUserMessage: Bool = false
     @State private var showThinking = false
     @State private var appeared = false
 
@@ -380,7 +442,10 @@ struct MessageView: View {
         }
         .padding(.top, topSpacing)
         .opacity(appeared ? 1 : 0)
-        .onAppear { withAnimation(.easeOut(duration: 0.12)) { appeared = true } }
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.12)) { appeared = true }
+            showThinking = showThinkingDefault
+        }
     }
 
     // MARK: - User Message (left-rail aligned, subtle container)
@@ -393,7 +458,7 @@ struct MessageView: View {
 
             if !message.content.isEmpty {
                 Text(message.content)
-                    .font(.system(size: Typo.bodySize))
+                    .font(.system(size: CGFloat(fontSize)))
                     .tracking(Typo.tracking)
                     .lineSpacing(Typo.lineGap)
                     .foregroundColor(Typo.primaryText)
@@ -411,6 +476,14 @@ struct MessageView: View {
                     .stroke(Color.white.opacity(0.04), lineWidth: 1)
             )
             .frame(maxWidth: 640, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("You: \(message.content)")
+            .contextMenu { messageContextMenu }
+            .onTapGesture(count: 2) {
+                if isLastUserMessage && !vm.isLoading {
+                    vm.editLastUserMessage()
+                }
+            }
     }
 
     private func attachmentWrap(_ attachments: [AttachmentItem], removable: Bool) -> some View {
@@ -449,18 +522,9 @@ struct MessageView: View {
                     .padding(.bottom, 8)
             }
 
-            // Content: crossfade from streaming plain text to block-parsed markdown
+            // Content: always render through markdown parser (streaming and finalized)
             if !message.content.isEmpty {
-                ZStack(alignment: .topLeading) {
-                    StreamingTextView(text: message.content)
-                        .opacity(message.isStreaming ? 1 : 0)
-
-                    if !message.isStreaming {
-                        MarkdownBlocksView(blocks: MarkdownParser.parse(message.content))
-                            .transition(.opacity)
-                    }
-                }
-                .animation(.easeOut(duration: 0.12), value: message.isStreaming)
+                StreamingMarkdownView(content: message.content, isStreaming: message.isStreaming)
             }
 
             // Streaming dots
@@ -486,6 +550,7 @@ struct MessageView: View {
                     .foregroundColor(Typo.tertiaryText)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(showThinking ? "Hide reasoning" : "Show reasoning")
                 .padding(.top, 10)
                 .animation(.easeOut(duration: 0.14), value: showThinking)
 
@@ -501,6 +566,29 @@ struct MessageView: View {
             }
         }
         .frame(maxWidth: 640, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(message.agent ?? "Boss"): \(message.content)")
+        .contextMenu { messageContextMenu }
+    }
+
+    // MARK: - Message Context Menu
+
+    @ViewBuilder
+    private var messageContextMenu: some View {
+        Button("Copy Message") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(message.content, forType: .string)
+        }
+        Button("Copy as Markdown") {
+            let prefix = message.role == .user ? "## User" : "## Assistant (\(message.agent ?? "Boss"))"
+            let md = "\(prefix)\n\n\(message.content)"
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(md, forType: .string)
+        }
+        Divider()
+        Button("Delete Message", role: .destructive) {
+            vm.deleteMessage(message.id)
+        }
     }
 
     // MARK: - Execution Narrative
@@ -513,15 +601,39 @@ struct MessageView: View {
                 .contentTransition(.opacity)
 
             if let statusLine = secondaryLine(for: step) {
-                Text(statusLine)
-                    .font(.system(size: 12))
-                    .foregroundColor(Typo.tertiaryText)
-                    .contentTransition(.opacity)
+                HStack(spacing: 8) {
+                    Text(statusLine)
+                        .font(.system(size: 12))
+                        .foregroundColor(Typo.tertiaryText)
+                        .contentTransition(.opacity)
+
+                    if step.state == .failure {
+                        Button(action: { vm.retryLastMessage() }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 10, weight: .medium))
+                                Text("Retry")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .foregroundColor(Color.white.opacity(0.6))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule()
+                                    .fill(Color.white.opacity(0.06))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Retry last message")
+                    }
+                }
             }
 
             if let request = step.permissionRequest, step.state == .waitingPermission {
-                PermissionPromptView(request: request) { decision in
-                    vm.respondToPermission(messageId: message.id, request: request, decision: decision)
+                PulsingPermissionView {
+                    PermissionPromptView(request: request) { decision in
+                        vm.respondToPermission(messageId: message.id, request: request, decision: decision)
+                    }
                 }
                 .padding(.top, 4)
             }
@@ -596,34 +708,66 @@ private struct AttachmentChipView: View {
     let removable: Bool
     var onRemove: (() -> Void)? = nil
 
+    private var fileTypeIcon: String {
+        let ext = attachment.url.pathExtension.lowercased()
+        if attachment.isImage { return "photo" }
+        if ["md", "markdown"].contains(ext) { return "doc.richtext" }
+        if attachment.isPreviewableText { return "curlybraces" }
+        return "paperclip"
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: attachment.symbolName)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(Color.white.opacity(0.72))
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(attachment.displayName)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Color.white.opacity(0.82))
-                    .lineLimit(1)
-
-                Text(attachment.path)
-                    .font(.system(size: 10))
-                    .foregroundColor(Color.white.opacity(0.38))
-                    .lineLimit(1)
-            }
-
-            if removable, let onRemove {
-                Button(action: onRemove) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Color.white.opacity(0.45))
-                        .frame(width: 18, height: 18)
+        Button(action: {
+            NSWorkspace.shared.activateFileViewerSelecting([attachment.url])
+        }) {
+            VStack(alignment: .leading, spacing: 0) {
+                if attachment.isImage {
+                    AsyncImage(url: attachment.url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(maxWidth: 200, maxHeight: 140)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .padding(.bottom, 6)
+                        default:
+                            EmptyView()
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
+
+                HStack(spacing: 8) {
+                    Image(systemName: fileTypeIcon)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.72))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(attachment.displayName)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color.white.opacity(0.82))
+                            .lineLimit(1)
+
+                        Text(attachment.path)
+                            .font(.system(size: 10))
+                            .foregroundColor(Color.white.opacity(0.38))
+                            .lineLimit(1)
+                    }
+
+                    if removable, let onRemove {
+                        Button(action: onRemove) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(Color.white.opacity(0.45))
+                                .frame(width: 18, height: 18)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove attachment")
+                    }
+                }
             }
         }
+        .buttonStyle(.plain)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(
@@ -634,5 +778,106 @@ private struct AttachmentChipView: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(Color.white.opacity(0.05), lineWidth: 1)
         )
+    }
+}
+
+// MARK: - Streaming Markdown (incremental rendering with caching)
+
+private struct StreamingMarkdownView: View {
+    let content: String
+    let isStreaming: Bool
+
+    @State private var parsedBlocks: [MarkdownNode] = []
+    @State private var lastParsedLength: Int = 0
+    @State private var pulsing = false
+    @State private var parseTask: Task<Void, Never>?
+
+    private var hasUnclosedCodeFence: Bool {
+        var fenceCount = 0
+        for line in content.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let backticks = trimmed.prefix(while: { $0 == "`" })
+            if backticks.count >= 3 { fenceCount += 1 }
+        }
+        return fenceCount % 2 == 1
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MarkdownBlocksView(blocks: parsedBlocks)
+
+            if isStreaming && hasUnclosedCodeFence {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(Color.white.opacity(pulsing ? 0.3 : 0.08))
+                    .frame(width: 24, height: 2)
+                    .padding(.leading, 14)
+                    .padding(.top, -6)
+                    .animation(
+                        .easeInOut(duration: 0.7).repeatForever(autoreverses: true),
+                        value: pulsing
+                    )
+                    .onAppear { pulsing = true }
+            }
+        }
+        .onAppear { reparse() }
+        .onChange(of: content) { _, _ in
+            if !isStreaming {
+                reparse()
+            } else {
+                let delta = abs(content.count - lastParsedLength)
+                if delta >= 20 || parsedBlocks.isEmpty {
+                    reparse()
+                }
+            }
+        }
+        .onChange(of: isStreaming) { _, streaming in
+            if !streaming { reparse() }
+        }
+    }
+
+    private func reparse() {
+        parseTask?.cancel()
+        let text = content
+        parseTask = Task.detached(priority: .userInitiated) {
+            let blocks = MarkdownParser.parse(text)
+            await MainActor.run {
+                parsedBlocks = blocks
+                lastParsedLength = text.count
+            }
+        }
+    }
+}
+
+// MARK: - Pulsing ring wrapper for pending permission prompts
+
+private struct PulsingPermissionView<Content: View>: View {
+    let content: () -> Content
+    @State private var pulsing = false
+
+    var body: some View {
+        content()
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.orange.opacity(pulsing ? 0.6 : 0.15), lineWidth: 1.5)
+                    .scaleEffect(pulsing ? 1.01 : 0.99)
+                    .animation(
+                        .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
+                        value: pulsing
+                    )
+            )
+            .onAppear { pulsing = true }
+    }
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+}
+
+// MARK: - Preference Key for Scroll Position Tracking
+
+private struct ScrollBottomOffsetKey: PreferenceKey {
+    nonisolated(unsafe) static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
