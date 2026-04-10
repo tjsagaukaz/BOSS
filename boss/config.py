@@ -113,6 +113,11 @@ class Settings:
     computer_use_model: str = os.getenv("BOSS_COMPUTER_USE_MODEL", "gpt-5.4")
     computer_use_max_turns: int = max(1, _env_int("BOSS_COMPUTER_USE_MAX_TURNS", 50))
     computer_use_headless: bool = _env_bool("BOSS_COMPUTER_USE_HEADLESS", True)
+    computer_use_allowed_domains: tuple[str, ...] = tuple(
+        d.strip()
+        for d in os.getenv("BOSS_COMPUTER_USE_ALLOWED_DOMAINS", "").split(",")
+        if d.strip()
+    )
     computer_use_data_dir: Path = Path(
         os.getenv("BOSS_COMPUTER_USE_DATA_DIR", app_data_dir / "computer")
     )

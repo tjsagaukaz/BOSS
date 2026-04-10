@@ -45,6 +45,24 @@ struct ContentView: View {
                 PermissionBanner()
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
+
+            // Active computer-use session pip (visible from other surfaces)
+            if vm.computerState.isActive && vm.selectedSurface != .computer {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        ComputerSessionPip(
+                            domain: vm.computerState.session?.targetDomain ?? "session",
+                            status: vm.computerState.session?.status ?? .running,
+                            onTap: { vm.selectedSurface = .computer }
+                        )
+                        .padding(.trailing, 20)
+                        .padding(.bottom, 16)
+                    }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
     }
 
@@ -71,6 +89,8 @@ struct ContentView: View {
             UnifiedDeployView()
         case .iosDelivery:
             IOSDeliveryView()
+        case .computer:
+            ComputerView()
         case .settings:
             SettingsView()
         }
@@ -118,7 +138,7 @@ private struct SurfaceKeyboardShortcuts: ViewModifier {
 
     private static let surfaceMap: [Character: AppSurface] = [
         "1": .chat, "2": .memory, "3": .review,
-        "4": .deploy, "5": .settings
+        "4": .deploy, "5": .computer, "6": .settings
     ]
 
     func body(content: Content) -> some View {
@@ -197,6 +217,12 @@ struct SidebarView: View {
 
             sidebarNavRow("Deploy", icon: "shippingbox", selected: vm.selectedSurface == .deploy) {
                 vm.showDeploy()
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 2)
+
+            sidebarNavRow("Computer", icon: "desktopcomputer", selected: vm.selectedSurface == .computer) {
+                vm.selectedSurface = .computer
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 12)

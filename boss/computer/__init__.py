@@ -34,14 +34,19 @@ from boss.computer.browser import (
 )
 from boss.computer.engine import (
     cancel_session,
+    classify_actions,
     computer_use_status,
     create_session,
     execute_turn,
     is_cancelled,
     is_paused,
     pause_session,
+    request_approval,
+    resolve_approval,
+    resume_after_approval,
     resume_session,
     run_session,
+    validate_target_domain,
 )
 
 __all__ = [
@@ -72,12 +77,17 @@ __all__ = [
     "PlaywrightMissing",
     # Engine
     "cancel_session",
+    "classify_actions",
     "computer_use_status",
     "create_session",
     "execute_turn",
     "is_cancelled",
     "is_paused",
     "pause_session",
+    "request_approval",
+    "resolve_approval",
+    "resume_after_approval",
     "resume_session",
     "run_session",
+    "validate_target_domain",
 ]

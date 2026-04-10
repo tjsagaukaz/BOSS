@@ -3051,3 +3051,225 @@ async def ios_delivery_upload_status(run_id: str):
 
     status = check_processing_status(run)
     return status.to_dict()
+
+
+# --- Computer-use session endpoints ---
+
+
+@app.get("/api/computer/status")
+async def computer_status_endpoint():
+    from boss.computer.engine import computer_use_status
+    return computer_use_status()
+
+
+@app.get("/api/computer/sessions")
+async def computer_list_sessions(limit: int = 50):
+    from boss.computer.state import list_sessions
+    safe_limit = max(1, min(limit, 200))
+    sessions = list_sessions()[:safe_limit]
+    return [s.to_dict() for s in sessions]
+
+
+@app.get("/api/computer/sessions/{session_id}")
+async def computer_get_session(session_id: str):
+    from boss.computer.state import load_session
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Computer session not found")
+    return session.to_dict()
+
+
+@app.get("/api/computer/sessions/{session_id}/events")
+async def computer_get_events(session_id: str):
+    from boss.computer.state import load_session, read_events
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Computer session not found")
+    return read_events(session_id)
+
+
+@app.post("/api/computer/sessions")
+async def computer_create_session(request: Request):
+    from boss.config import settings as _settings
+    from boss.computer.engine import create_session, validate_target_domain
+
+    if not _settings.computer_use_enabled:
+        raise HTTPException(status_code=403, detail="Computer-use is disabled")
+
+    body = await request.json()
+    target_url = body.get("target_url", "").strip()
+    if not target_url:
+        raise HTTPException(status_code=400, detail="target_url is required")
+    if not target_url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="target_url must be http:// or https://")
+
+    allowed, reason = validate_target_domain(target_url)
+    if not allowed:
+        raise HTTPException(status_code=403, detail=reason)
+
+    session = create_session(
+        target_url=target_url,
+        task=body.get("task") or None,
+        project_path=body.get("project_path") or None,
+        model=body.get("model") or None,
+        headless=body.get("headless", _settings.computer_use_headless),
+        viewport_width=body.get("viewport_width", 1280),
+        viewport_height=body.get("viewport_height", 800),
+    )
+    return session.to_dict()
+
+
+@app.post("/api/computer/sessions/{session_id}/start")
+async def computer_start_session(session_id: str):
+    """Start the computer-use loop on a background thread."""
+    import contextvars
+    import threading
+
+    from boss.config import settings as _settings
+    from boss.computer.engine import run_session
+    from boss.computer.state import load_session, SessionStatus
+
+    if not _settings.computer_use_enabled:
+        raise HTTPException(status_code=403, detail="Computer-use is disabled")
+
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Computer session not found")
+    if session.is_terminal:
+        raise HTTPException(status_code=409, detail=f"Session is already {session.status}")
+    if session.status not in (SessionStatus.CREATED, SessionStatus.PAUSED):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session is in status '{session.status}', expected 'created' or 'paused'",
+        )
+
+    ctx = contextvars.copy_context()
+
+    def _run_loop() -> None:
+        try:
+            run_session(session, max_turns=_settings.computer_use_max_turns)
+        except Exception:
+            import logging
+            logging.getLogger("boss.api").exception(
+                "Computer-use session failed: %s", session_id
+            )
+
+    threading.Thread(
+        target=ctx.run, args=(_run_loop,),
+        daemon=True, name=f"computer-{session_id[:12]}",
+    ).start()
+
+    return session.to_dict()
+
+
+@app.post("/api/computer/sessions/{session_id}/approve")
+async def computer_approve_action(session_id: str, request: Request):
+    """Approve or deny a pending action batch."""
+    from boss.computer.engine import resolve_approval, resume_after_approval
+    from boss.computer.state import load_session, SessionStatus
+
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Computer session not found")
+    if not session.approval_pending:
+        raise HTTPException(status_code=409, detail="No pending approval for this session")
+
+    body = await request.json()
+    approval_id = body.get("approval_id", "").strip()
+    decision = body.get("decision", "").strip()
+
+    if not approval_id:
+        raise HTTPException(status_code=400, detail="approval_id is required")
+    if decision not in ("allow", "deny"):
+        raise HTTPException(status_code=400, detail="decision must be 'allow' or 'deny'")
+
+    try:
+        session = resolve_approval(session, approval_id, decision)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # If allowed, resume the loop on a background thread
+    if decision == "allow" and not session.is_terminal:
+        import contextvars
+        import threading
+
+        from boss.config import settings as _settings
+
+        ctx = contextvars.copy_context()
+
+        def _resume_loop() -> None:
+            try:
+                resume_after_approval(
+                    session, max_turns=_settings.computer_use_max_turns
+                )
+            except Exception:
+                import logging
+                logging.getLogger("boss.api").exception(
+                    "Computer-use resume failed: %s", session_id
+                )
+
+        threading.Thread(
+            target=ctx.run, args=(_resume_loop,),
+            daemon=True, name=f"computer-resume-{session_id[:12]}",
+        ).start()
+
+    return session.to_dict()
+
+
+@app.post("/api/computer/sessions/{session_id}/cancel")
+async def computer_cancel_session(session_id: str):
+    from boss.computer.engine import cancel_session
+    from boss.computer.state import load_session
+
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Computer session not found")
+    if session.is_terminal:
+        raise HTTPException(status_code=409, detail=f"Session is already {session.status}")
+
+    cancel_session(session_id)
+
+    # Also resolve any pending approval as denied
+    if session.approval_pending and session.pending_approval_id:
+        from boss.computer.engine import resolve_approval
+        try:
+            session = resolve_approval(session, session.pending_approval_id, "deny")
+        except ValueError:
+            pass
+
+    return {"status": "cancellation_requested", "session_id": session_id}
+
+
+@app.post("/api/computer/sessions/{session_id}/pause")
+async def computer_pause_session(session_id: str):
+    from boss.computer.engine import pause_session
+    from boss.computer.state import load_session
+
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Computer session not found")
+    if session.is_terminal:
+        raise HTTPException(status_code=409, detail=f"Session is already {session.status}")
+
+    pause_session(session_id)
+    return {"status": "pause_requested", "session_id": session_id}
+
+
+@app.get("/api/computer/sessions/{session_id}/screenshot")
+async def computer_get_screenshot(session_id: str):
+    from boss.computer.state import load_session
+
+    session = load_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Computer session not found")
+
+    if not session.latest_screenshot_path:
+        raise HTTPException(status_code=404, detail="No screenshot available")
+
+    from pathlib import Path as _P
+    ss_path = _P(session.latest_screenshot_path)
+    if not ss_path.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot file not found")
+
+    from starlette.responses import FileResponse
+    return FileResponse(str(ss_path), media_type="image/png")

@@ -38,6 +38,7 @@ final class ChatViewModel: ObservableObject {
     var jobsState = JobsState()
     var reviewState = ReviewState()
     var workersState = WorkersState()
+    var computerState = ComputerState()
     var deployState = DeployState()
     var iosDeliveryState = IOSDeliveryState()
     var memoryState = MemoryState()
@@ -80,6 +81,7 @@ final class ChatViewModel: ObservableObject {
         deployState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         iosDeliveryState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         memoryState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        computerState.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
 
         // Wire memory mutation callback to refresh sidebar
         memoryState.onMemoryChanged = { [weak self] in

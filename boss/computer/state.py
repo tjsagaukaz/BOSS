@@ -151,6 +151,7 @@ class ComputerSession:
     project_path: str | None = None
     target_url: str | None = None
     target_domain: str | None = None
+    task: str | None = None
 
     # Harness
     harness_type: str = HarnessType.BROWSER
@@ -159,6 +160,7 @@ class ComputerSession:
     # Session lifecycle
     status: str = SessionStatus.CREATED
     approval_pending: bool = False
+    pending_approval_id: str | None = None
     pause_requested: bool = False
 
     # Model

@@ -45,6 +45,7 @@ enum AppSurface: Equatable {
     case workers
     case deploy
     case iosDelivery
+    case computer
     case settings
 }
 
