@@ -244,8 +244,14 @@ def _run_shell_sdk(command: str, cwd: str, timeout: int) -> str:
         data=call_data,
     )
 
+    effective_cwd: Path | None = None
+    if cwd:
+        effective_cwd = Path(cwd).expanduser()
+        if not effective_cwd.is_dir():
+            return f"Working directory does not exist: {cwd}"
+
     try:
-        sdk_result = boss_shell_executor(request)
+        sdk_result = boss_shell_executor(request, cwd=effective_cwd)
     except Exception as exc:
         return f"SDK shell error: {exc}"
 

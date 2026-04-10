@@ -382,6 +382,23 @@ class SDKShellBackendTests(unittest.TestCase):
                     if original is not None:
                         sys.modules["agents"] = original
 
+    def test_sdk_backend_respects_cwd(self):
+        """SDK shell path must honour the cwd argument."""
+        with tempfile.TemporaryDirectory() as tmp:
+            subdir = Path(tmp) / "inner"
+            subdir.mkdir()
+            from boss.tools.action import run_shell as rs_tool
+
+            with patch("boss.config.settings") as mock_settings:
+                mock_settings.sdk_shell_backend = True
+
+                result = _with_runner(
+                    lambda: _invoke_tool(rs_tool, {"command": "pwd", "cwd": str(subdir)}),
+                    tmp,
+                    allowed_prefixes=("echo", "cat", "ls", "pwd", "python3"),
+                )
+                self.assertIn("inner", result)
+
 
 # ── Runner context leak prevention ──────────────────────────────────
 
@@ -560,12 +577,6 @@ class ConfigFlagTests(unittest.TestCase):
 
         s = Settings()
         self.assertFalse(s.sdk_shell_backend)
-
-    def test_sdk_patch_backend_defaults_false(self):
-        from boss.config import Settings
-
-        s = Settings()
-        self.assertFalse(s.sdk_patch_backend)
 
 
 # ── Regression: existing tools still work ───────────────────────────

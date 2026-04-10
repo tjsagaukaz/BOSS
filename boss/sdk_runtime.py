@@ -66,13 +66,17 @@ def _get_runner() -> RunnerEngine:
 # SDK ShellTool executor backend
 # ---------------------------------------------------------------------------
 
-def boss_shell_executor(request: Any) -> Any:
+def boss_shell_executor(request: Any, *, cwd: Path | None = None) -> Any:
     """A ``ShellExecutor`` callback for SDK ``ShellTool``.
 
     This is called by the SDK runner loop *after* Boss has already approved the
     tool call through the governed wrapper.  It routes each command through
     ``RunnerEngine.run_command`` so that runner-level policy (allowed prefixes,
     denied prefixes, write boundaries) still applies.
+
+    Args:
+        request: A ``ShellCommandRequest`` from the SDK.
+        cwd: Optional working directory. Passed through to the runner.
 
     Returns an ``agents.ShellResult`` so the SDK can format the output.
     """
@@ -108,7 +112,7 @@ def boss_shell_executor(request: Any) -> Any:
             ))
             continue
 
-        result = runner.run_command(parts, timeout=timeout_s)
+        result = runner.run_command(parts, timeout=timeout_s, cwd=cwd)
 
         if result.verdict != CommandVerdict.ALLOWED.value:
             outputs.append(ShellCommandOutput(
@@ -412,9 +416,7 @@ def sdk_runtime_status() -> dict[str, Any]:
     except ImportError:
         status["apply_patch_tool_available"] = False
 
-    status["patch_backend"] = (
-        "sdk" if settings.sdk_patch_backend else "native"
-    )
+    status["patch_backend"] = "native"  # always native; BossApplyPatchEditor available but not switchable
 
     status["sdk_version"] = _sdk_version()
 
